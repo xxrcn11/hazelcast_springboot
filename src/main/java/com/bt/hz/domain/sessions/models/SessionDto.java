@@ -41,7 +41,11 @@ public class SessionDto implements IdentifiedDataSerializable {
         out.writeString(userId);
         out.writeString(username);
         out.writeString(role);
-        out.writeLong(loginAt.toEpochSecond(java.time.ZoneOffset.UTC));
+        if (loginAt != null) {
+            out.writeLong(loginAt.toEpochSecond(java.time.ZoneOffset.UTC));
+        } else {
+            out.writeLong(0L);
+        }
     }
 
     @Override
@@ -49,7 +53,12 @@ public class SessionDto implements IdentifiedDataSerializable {
         userId = in.readString();
         username = in.readString();
         role = in.readString();
-        loginAt = LocalDateTime.ofEpochSecond(in.readLong(), 0, java.time.ZoneOffset.UTC);
+        long epoch = in.readLong();
+        if (epoch > 0) {
+            loginAt = LocalDateTime.ofEpochSecond(epoch, 0, java.time.ZoneOffset.UTC);
+        } else {
+            loginAt = null;
+        }
     }
 
 }
