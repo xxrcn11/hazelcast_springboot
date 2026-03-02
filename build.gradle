@@ -1,0 +1,84 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '3.4.3'
+    id 'io.spring.dependency-management' version '1.1.7'
+}
+
+group = 'com.bt'
+version = '0.0.1-SNAPSHOT'
+description = 'Hazelcast internal SpringBoot backend'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(17)
+    }
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+    // Hazelcast 컨테이너 내장 로깅 라이브러리와의 충돌(log4j-slf4j2-impl vs log4j-to-slf4j) 방지
+    all {
+        exclude group: 'org.apache.logging.log4j', module: 'log4j-to-slf4j'
+        exclude group: 'ch.qos.logback', module: 'logback-classic'
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    set('hazelcastVersion', '5.5.0')
+}
+
+dependencies {
+
+    // Spring Boot Validation
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    
+    // MyBatis Spring Boot Starter
+    implementation 'org.mybatis.spring.boot:mybatis-spring-boot-starter:3.0.4'
+    
+    // MySQL Connector
+    runtimeOnly 'com.mysql:mysql-connector-j'
+    
+    // JSON Parsing for Jet Pipeline
+    implementation 'com.fasterxml.jackson.core:jackson-databind'
+    implementation 'com.fasterxml.jackson.datatype:jackson-datatype-jsr310'
+    
+    // Hazelcast
+    implementation "com.hazelcast:hazelcast-spring:${hazelcastVersion}"
+    
+
+    // Lombok
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+    
+    // Spring Boot Test
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}
+
+// Spring Boot의 실행 가능한 JAR 대신 일반 JAR 생성
+bootJar {
+    enabled = false
+}
+
+jar {
+    enabled = true
+}
+
+// Hazelcast Docker 이미지에 라이브러리들을 복사하기 위해 모든 의존성 JAR들을 모으는 태스크
+tasks.register('copyDependencies', Copy) {
+    from configurations.runtimeClasspath
+    into "$buildDir/libs/dependencies"
+}
+
+// 빌드 시 의존성 복사 태스크도 함께 수행하도록 설정
+assemble.dependsOn copyDependencies

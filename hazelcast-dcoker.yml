@@ -1,0 +1,67 @@
+version: '3.8'
+
+services:
+  # 1. 커스텀 Hazelcast + Spring Boot 노드 1 (Main)
+  hz-node1:
+    build: .             # Spring Boot JAR가 포함된 커스텀 Dockerfile 빌드
+    container_name: hz-node1
+    ports:
+      - "5701:5701"      # 외부 클라이언트 또는 Management Center 접근용
+    environment:
+      - HZ_CLUSTERNAME=dev
+      - SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/testdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - hazelcast-network
+
+  # 2. 커스텀 Hazelcast + Spring Boot 노드 2 (Member)
+  hz-node2:
+    build: .             # 클러스터 멤버들도 반드시 동일한 커스텀 이미지를 써야 Serializable 에러가 나지 않습니다.
+    container_name: hz-node2
+    ports:
+      - "5702:5701"
+    environment:
+      - HZ_CLUSTERNAME=dev
+      - SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/testdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - hz-node1
+    networks:
+      - hazelcast-network
+
+  # 3. 커스텀 Hazelcast + Spring Boot 노드 3 (Member)
+  hz-node3:
+    build: .
+    container_name: hz-node3
+    ports:
+      - "5703:5701"
+    environment:
+      - HZ_CLUSTERNAME=dev
+      - SPRING_DATASOURCE_URL=jdbc:mysql://host.docker.internal:3306/testdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - hz-node1
+      - hz-node2
+    networks:
+      - hazelcast-network
+
+  # 4. Hazelcast Management Center (모니터링)
+  hz-mancenter:
+    image: hazelcast/management-center:5.5
+    container_name: hz-mancenter
+    ports:
+      - "8080:8080"      # Management Center 웹 UI 포트 (이 앱의 유일한 Web)
+    environment:
+      - MC_DEFAULT_CLUSTER=dev
+      - MC_DEFAULT_CLUSTER_MEMBERS=hz-node1,hz-node2,hz-node3 # 모니터링할 클러스터 노드 지정
+    depends_on:
+      - hz-node1
+    networks:
+      - hazelcast-network
+
+networks:
+  hazelcast-network:
+    driver: bridge

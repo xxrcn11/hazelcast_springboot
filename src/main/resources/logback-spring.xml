@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+
+    <!-- Spring Boot's default logging configuration -->
+    <include resource="org/springframework/boot/logging/logback/defaults.xml" />
+    <include resource="org/springframework/boot/logging/logback/console-appender.xml" />
+
+    <!-- Set root logger level to INFO -->
+    <root level="INFO">
+        <appender-ref ref="CONSOLE" />
+    </root>
+
+    <!-- Suppress repetitive Jet Pipeline Watermark/Transform logs -->
+    <logger name="com.hazelcast.jet.impl.pipeline.TransformP" level="WARN" />
+    <logger name="com.hazelcast.jet.impl.pipeline.TransformUsingServiceP" level="WARN" />
+    <logger name="com.hazelcast.jet.impl.JobExecutionService" level="WARN" />
+    <logger name="com.hazelcast.jet.impl" level="WARN" />
+    <logger name="com.hazelcast" level="WARN" />
+
+</configuration>

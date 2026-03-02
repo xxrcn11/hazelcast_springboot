@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: hazelcast-springboot
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration
+  datasource:
+    url: jdbc:mysql://localhost:3306/testdb?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true
+    username: testuser
+    password: testpassword
+    driver-class-name: com.mysql.cj.jdbc.Driver
+mybatis:
+  mapper-locations: classpath:mapper/**/*.xml
+  configuration:
+    map-underscore-to-camel-case: true
+
+logging:
+  level:
+    com.hazelcast.jet.impl.pipeline.TransformP: WARN
+    com.hazelcast.jet.impl.pipeline.TransformUsingServiceP: WARN
