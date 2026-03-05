@@ -16,4 +16,6 @@ COPY build/libs/*.jar /opt/hazelcast/lib/
 
 # 4. Hazelcast가 커스텀 설정 파일을 사용하도록 환경변수 지정
 ENV JAVA_OPTS="-Dhazelcast.config=/opt/hazelcast/config/hazelcast.xml \
-    -Dlogging.level.com.hazelcast.jet=WARN"
+    -Dlogging.level.com.hazelcast.jet=INFO \
+    -Dlogging.level.com.hazelcast.jet.impl.connector.StreamEventJournalP=WARN \
+    -Dlogging.level.com.hazelcast.jet.impl.processor.TransformP=WARN"

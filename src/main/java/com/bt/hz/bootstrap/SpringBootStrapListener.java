@@ -87,6 +87,17 @@ public class SpringBootStrapListener implements LifecycleListener {
                             .getBean(com.bt.hz.domain.sessions.SessionJetPipelineConfig.class);
                     jetPipeline.initPipeline();
 
+                    // 테스트 데이터 주입
+                    java.util.Map<String, String> data = new java.util.HashMap<>();
+                    data.put("LOGIN", "test_login");
+                    data.put("LOGIN_TYPE", "WEB");
+                    data.put("USER_INFO",
+                            "{\"userId\":\"1\", \"username\":\"u\", \"role\":\"admin\", \"loginAt\":\"20260306183700\"}");
+                    hzInstance.getMap("bt_sessions").put("test_spring_session", data);
+                    log.info("================================");
+                    log.info("INSERTING TEST DATA INTO bt_sessions (after pipeline init)");
+                    log.info("================================");
+
                 } catch (Exception e) {
                     log.error("CRITICAL: Failed to initialize cluster components. Halting node.", e);
                     // Fail-Fast: 핵심 로직 실패 시 불안전한 상태로 노드 유지 방지

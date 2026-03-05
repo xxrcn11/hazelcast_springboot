@@ -1,6 +1,7 @@
 package com.bt.hz.domain.sessions.models;
 
 import java.io.IOException;
+import java.time.LocalDateTime;
 
 import com.bt.hz.config.ServerDataSerializableFactory;
 import com.hazelcast.nio.ObjectDataInput;
@@ -16,14 +17,16 @@ import lombok.Setter;
 @Getter
 @Setter
 @Builder
-@NoArgsConstructor // 역직렬화를 위해 기본 생성자 필수
+@NoArgsConstructor
 @AllArgsConstructor
-public class SessionDto implements IdentifiedDataSerializable, java.io.Serializable {
+public class SYSSE014I implements IdentifiedDataSerializable {
 
     private String userId;
     private String username;
-    private String role; // 단순화를 위해 단일 롤 (ADMIN/USER 등)
+    private String role;
+    private String loginType;
     private String loginAt;
+    private String logoutAt;
 
     @Override
     public int getFactoryId() {
@@ -32,7 +35,7 @@ public class SessionDto implements IdentifiedDataSerializable, java.io.Serializa
 
     @Override
     public int getClassId() {
-        return ServerDataSerializableFactory.SESSION_DTO_TYPE;
+        return ServerDataSerializableFactory.SYSSE014I_TYPE;
     }
 
     @Override
@@ -40,7 +43,10 @@ public class SessionDto implements IdentifiedDataSerializable, java.io.Serializa
         out.writeString(userId);
         out.writeString(username);
         out.writeString(role);
+        out.writeString(loginType);
         out.writeString(loginAt);
+        out.writeString(logoutAt);
+
     }
 
     @Override
@@ -48,7 +54,9 @@ public class SessionDto implements IdentifiedDataSerializable, java.io.Serializa
         userId = in.readString();
         username = in.readString();
         role = in.readString();
+        loginType = in.readString();
         loginAt = in.readString();
-    }
+        logoutAt = in.readString();
 
+    }
 }

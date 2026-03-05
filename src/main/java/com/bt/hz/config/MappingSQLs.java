@@ -29,14 +29,18 @@ public final class MappingSQLs {
                         ")";
 
         public static final String CREATE_MAPPING_SESSION_M_SYSSE001I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE001I (" +
-                        "    __key VARCHAR" +
+                        "    __key VARCHAR," +
+                        "    LOGIN VARCHAR EXTERNAL NAME \"login\"," +
+                        "    LOGIN_TYPE VARCHAR EXTERNAL NAME \"loginType\"," +
+                        "    USER_INFO VARCHAR EXTERNAL NAME \"userInfo\"," +
+                        "    SESSION_ID VARCHAR EXTERNAL NAME \"sessionId\"" +
                         ") " +
                         "TYPE IMap " +
                         "OPTIONS (" +
                         "    'keyFormat' = 'java'," +
                         "    'keyJavaClass' = 'java.lang.String'," +
                         "    'valueFormat' = 'java'," +
-                        "    'valueJavaClass' = 'java.util.Map'" +
+                        "    'valueJavaClass' = 'com.bt.hz.domain.sessions.models.SYSSE001I'" +
                         ")";
 
         public static final String CREATE_MAPPING_SESSION_M_SYSSE002I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE002I (" +
@@ -44,7 +48,7 @@ public final class MappingSQLs {
                         "    userId VARCHAR," +
                         "    username VARCHAR," +
                         "    role VARCHAR," +
-                        "    loginAt TIMESTAMP" +
+                        "    loginAt VARCHAR" +
                         ") " +
                         "TYPE IMap " +
                         "OPTIONS (" +
@@ -52,6 +56,37 @@ public final class MappingSQLs {
                         "    'keyJavaClass' = 'java.lang.String'," +
                         "    'valueFormat' = 'java'," +
                         "    'valueJavaClass' = 'com.bt.hz.domain.sessions.models.SessionDto'" +
+                        ")";
+
+        public static final String CREATE_MAPPING_SESSION_M_SYSSE014I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE014I (" +
+                        "    __key VARCHAR," +
+                        "    userId VARCHAR," +
+                        "    username VARCHAR," +
+                        "    role VARCHAR," +
+                        "    loginAt VARCHAR," +
+                        "    loginType VARCHAR," +
+                        "    logoutAt VARCHAR" +
+                        ") " +
+                        "TYPE IMap " +
+                        "OPTIONS (" +
+                        "    'keyFormat' = 'java'," +
+                        "    'keyJavaClass' = 'java.lang.String'," +
+                        "    'valueFormat' = 'java'," +
+                        "    'valueJavaClass' = 'com.bt.hz.domain.sessions.models.SYSSE014I'" +
+                        ")";
+
+        public static final String CREATE_MAPPING_SESSION_M_SYSSE015I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE015I (" +
+                        "    __key VARCHAR," +
+                        "    stdYmd VARCHAR," +
+                        "    stdHour VARCHAR," +
+                        "    cnt INTEGER" +
+                        ") " +
+                        "TYPE IMap " +
+                        "OPTIONS (" +
+                        "    'keyFormat' = 'java'," +
+                        "    'keyJavaClass' = 'java.lang.String'," +
+                        "    'valueFormat' = 'java'," +
+                        "    'valueJavaClass' = 'com.bt.hz.domain.sessions.models.SYSSE015I'" +
                         ")";
 
         // ==========================================
@@ -73,6 +108,8 @@ public final class MappingSQLs {
                                 // 여기에 등록할 매핑 상수들을 나열합니다.
                                 CREATE_MAPPING_SESSION_BCB001I_IMAP,
                                 CREATE_MAPPING_SESSION_M_SYSSE001I_IMAP,
-                                CREATE_MAPPING_SESSION_M_SYSSE002I_IMAP);
+                                CREATE_MAPPING_SESSION_M_SYSSE002I_IMAP,
+                                CREATE_MAPPING_SESSION_M_SYSSE014I_IMAP,
+                                CREATE_MAPPING_SESSION_M_SYSSE015I_IMAP);
         }
 }

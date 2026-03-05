@@ -50,7 +50,7 @@ dependencies {
     
     // Hazelcast
     implementation "com.hazelcast:hazelcast-spring:${hazelcastVersion}"
-    
+    implementation 'org.springframework.session:spring-session-hazelcast'
 
     // Lombok
     compileOnly 'org.projectlombok:lombok'

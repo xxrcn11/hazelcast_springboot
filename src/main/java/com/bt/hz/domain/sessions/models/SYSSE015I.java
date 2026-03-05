@@ -16,14 +16,13 @@ import lombok.Setter;
 @Getter
 @Setter
 @Builder
-@NoArgsConstructor // 역직렬화를 위해 기본 생성자 필수
+@NoArgsConstructor
 @AllArgsConstructor
-public class SessionDto implements IdentifiedDataSerializable, java.io.Serializable {
+public class SYSSE015I implements IdentifiedDataSerializable {
 
-    private String userId;
-    private String username;
-    private String role; // 단순화를 위해 단일 롤 (ADMIN/USER 등)
-    private String loginAt;
+    private String stdYmd;
+    private String stdHour;
+    private int cnt;
 
     @Override
     public int getFactoryId() {
@@ -32,23 +31,20 @@ public class SessionDto implements IdentifiedDataSerializable, java.io.Serializa
 
     @Override
     public int getClassId() {
-        return ServerDataSerializableFactory.SESSION_DTO_TYPE;
+        return ServerDataSerializableFactory.SYSSE015I_TYPE;
     }
 
     @Override
     public void writeData(ObjectDataOutput out) throws IOException {
-        out.writeString(userId);
-        out.writeString(username);
-        out.writeString(role);
-        out.writeString(loginAt);
+        out.writeString(stdYmd);
+        out.writeString(stdHour);
+        out.writeInt(cnt);
     }
 
     @Override
     public void readData(ObjectDataInput in) throws IOException {
-        userId = in.readString();
-        username = in.readString();
-        role = in.readString();
-        loginAt = in.readString();
+        stdYmd = in.readString();
+        stdHour = in.readString();
+        cnt = in.readInt();
     }
-
 }
