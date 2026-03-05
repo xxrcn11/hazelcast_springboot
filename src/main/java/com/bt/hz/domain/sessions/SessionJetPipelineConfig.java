@@ -69,7 +69,7 @@ public class SessionJetPipelineConfig {
                 .<SessionInfo, SessionEventTransport>mapStateful(
                         java.util.concurrent.TimeUnit.HOURS.toMillis(11), // bt_sessions 10시간 TTL 고려하여 여유있게 11시간 설정
                         SessionInfo::new,
-                        (state, sessionId, event) -> {
+                        (sessionInfo, sessionId, event) -> {
                             Object value = event.getNewValue();
 
                             // 로그아웃 감지: REMOVE 이벤트, EXPIRED 이벤트 또는 값이 null인 경우
@@ -158,27 +158,29 @@ public class SessionJetPipelineConfig {
                                 System.out.println("[SessionJetPipeline] Extracted -> LOGIN: " + newLogin
                                         + ", LOGIN_TYPE: " + newLoginType + ", USER_INFO: " + newUserInfo);
 
-                                boolean wasCompleteBefore = state.isComplete();
+                                boolean wasCompleteBefore = sessionInfo.isComplete();
 
                                 // 상태 업데이트
-                                state.update(newLogin, newLoginType, newUserInfo);
+                                sessionInfo.update(newLogin, newLoginType, newUserInfo);
 
                                 // 처음 완성된 상태인지 체크 후 플래그 변경
                                 boolean isNewLogin = false;
-                                if (!wasCompleteBefore && state.isComplete() && !state.isCountProcessed) {
-                                    state.isCountProcessed = true;
+                                if (!wasCompleteBefore && sessionInfo.isComplete() && !sessionInfo.isCountProcessed) {
+                                    sessionInfo.isCountProcessed = true;
                                     isNewLogin = true;
                                 }
 
                                 System.out
-                                        .println("[SessionJetPipeline] Session State Complete? " + state.isComplete() +
+                                        .println("[SessionJetPipeline] Session State Complete? "
+                                                + sessionInfo.isComplete() +
                                                 ", isNewLogin? " + isNewLogin +
-                                                ", isCountProcessed? " + state.isCountProcessed);
+                                                ", isCountProcessed? " + sessionInfo.isCountProcessed);
 
                                 // 완성된 상태만 전달, 미완성 상태면 기록만 하고 스트림으로 내리지 않음 (null 반환)
-                                if (state.isComplete()) {
-                                    return new SessionEventTransport(sessionId, state.login, state.loginType,
-                                            state.userInfo, false, isNewLogin);
+                                if (sessionInfo.isComplete()) {
+                                    return new SessionEventTransport(sessionId, sessionInfo.login,
+                                            sessionInfo.loginType,
+                                            sessionInfo.userInfo, false, isNewLogin);
                                 } else {
                                     return null;
                                 }
@@ -188,7 +190,8 @@ public class SessionJetPipelineConfig {
                             }
                             return null;
                         },
-                        (state, sessionId, timestamp) -> new SessionEventTransport(sessionId, null, null, null, true,
+                        (sessionInfo, sessionId, timestamp) -> new SessionEventTransport(sessionId, null, null, null,
+                                true,
                                 false))
                 .filter(e -> e != null);
 
