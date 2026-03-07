@@ -9,9 +9,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
 
-@Slf4j
 @Configuration
 @RequiredArgsConstructor
+@Slf4j
 public class SessionJetPipelineConfig {
 
     private final HazelcastInstance hazelcastInstance;
@@ -48,6 +48,32 @@ public class SessionJetPipelineConfig {
     private Pipeline buildPipeline() {
         Pipeline p = Pipeline.create();
 
+        // =========================================================================
+        // [ServiceFactory 공통 선언 영역]
+        // 파이프라인 각 노드(Processor)에서 재사용할 서비스 객체의 생성 방법(Recipe)을 선언합니다.
+        // =========================================================================
+
+        // 1. 역직렬화를 위한 SerializationService 팩토리
+        com.hazelcast.jet.pipeline.ServiceFactory<?, com.hazelcast.internal.serialization.SerializationService> ssFactory = com.hazelcast.jet.pipeline.ServiceFactories
+                .sharedService(ctx -> {
+                    return ((com.hazelcast.instance.impl.HazelcastInstanceProxy) ctx.hazelcastInstance())
+                            .getSerializationService();
+                });
+
+        // 2. ObjectMapper를 노드별로 한 번만 생성하여 재사용하기 위한 팩토리
+        com.hazelcast.jet.pipeline.ServiceFactory<?, com.fasterxml.jackson.databind.ObjectMapper> mapperService = com.hazelcast.jet.pipeline.ServiceFactories
+                .sharedService(ctx -> {
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+                    mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
+                            false);
+                    return mapper;
+                });
+
+        // =========================================================================
+        // [파이프라인 단계(Step) 구성 영역]
+        // =========================================================================
+
         // 1단계 : bt_sessions에서 이벤트 인식
         StreamStage<EventJournalMapEvent<String, Object>> source = p.readFrom(
                 Sources.mapJournal(
@@ -63,105 +89,43 @@ public class SessionJetPipelineConfig {
                     return msg;
                 });
 
+        // 1.5단계 : 역직렬화 수행 (노드별로 공유되는 SerializationService 활용)
+        StreamStage<ExtractedSessionEvent> extractedStream = source.mapUsingService(ssFactory, (ss, event) -> {
+            Object value = event.getNewValue();
+            if (event.getType() == com.hazelcast.core.EntryEventType.REMOVED ||
+                    event.getType() == com.hazelcast.core.EntryEventType.EXPIRED ||
+                    value == null) {
+                return new ExtractedSessionEvent(event.getKey(), true, null, null, null);
+            }
+            java.util.Map<?, ?> attrs = extractSessionStateAttributes(value);
+            String login = null;
+            String loginType = null;
+            String userInfo = null;
+            if (attrs != null) {
+                login = deserializeString(ss, attrs.get("LOGIN"));
+                loginType = deserializeString(ss, attrs.get("LOGIN_TYPE"));
+                userInfo = deserializeString(ss, attrs.get("USER_INFO"));
+            }
+            return new ExtractedSessionEvent(event.getKey(), false, login, loginType, userInfo);
+        });
+
         // 2단계 : bt_sessions에 저장된 값들 추출, 부분적으로 들어오는 이벤트를 상태로 모아서 운반
-        StreamStage<SessionEventTransport> parsedStream = source
-                .groupingKey(EventJournalMapEvent::getKey)
+        StreamStage<SessionEventTransport> parsedStream = extractedStream
+                .groupingKey(ExtractedSessionEvent::getSessionId)
                 .<SessionInfo, SessionEventTransport>mapStateful(
                         java.util.concurrent.TimeUnit.HOURS.toMillis(11), // bt_sessions 10시간 TTL 고려하여 여유있게 11시간 설정
                         SessionInfo::new,
                         (sessionInfo, sessionId, event) -> {
-                            Object value = event.getNewValue();
-
-                            // 로그아웃 감지: REMOVE 이벤트, EXPIRED 이벤트 또는 값이 null인 경우
-                            if (event.getType() == com.hazelcast.core.EntryEventType.REMOVED ||
-                                    event.getType() == com.hazelcast.core.EntryEventType.EXPIRED ||
-                                    value == null) {
+                            // 로그아웃 감지
+                            if (event.isLogout) {
                                 return new SessionEventTransport(sessionId, null, null, null, true, false);
                             }
 
                             try {
-                                Object rLogin = null;
-                                Object rLoginType = null;
-                                Object rUserInfo = null;
-
-                                // Spring Session 또는 Hazelcast Web SessionState의 속성 추출을 위해 다양한 접근 시도
-                                try {
-                                    if (value instanceof java.util.Map) {
-                                        java.util.Map<?, ?> map = (java.util.Map<?, ?>) value;
-                                        rLogin = map.get("LOGIN");
-                                        rLoginType = map.get("LOGIN_TYPE");
-                                        rUserInfo = map.get("USER_INFO");
-                                        System.out.println(
-                                                "[SessionJetPipeline] Session ID: " + sessionId + " (Map parsing)");
-                                    } else {
-                                        // 1. getAttribute(String) 단일 속성 가져오기 시도
-                                        try {
-                                            java.lang.reflect.Method getAttributeMethod = value.getClass()
-                                                    .getMethod("getAttribute", String.class);
-                                            rLogin = getAttributeMethod.invoke(value, "LOGIN");
-                                            rLoginType = getAttributeMethod.invoke(value, "LOGIN_TYPE");
-                                            rUserInfo = getAttributeMethod.invoke(value, "USER_INFO");
-                                            System.out.println("[SessionJetPipeline] Session ID: " + sessionId
-                                                    + " (getAttribute() parsing)");
-                                        } catch (NoSuchMethodException e1) {
-                                            // 2. getAttributes() 로 맵 가져오기 시도 (com.hazelcast.web.SessionState 특화)
-                                            try {
-                                                java.lang.reflect.Method getAttributesMethod = value.getClass()
-                                                        .getMethod("getAttributes");
-                                                Object attrsObj = getAttributesMethod.invoke(value);
-                                                if (attrsObj instanceof java.util.Map) {
-                                                    java.util.Map<?, ?> attrs = (java.util.Map<?, ?>) attrsObj;
-                                                    rLogin = attrs.get("LOGIN");
-                                                    rLoginType = attrs.get("LOGIN_TYPE");
-                                                    rUserInfo = attrs.get("USER_INFO");
-                                                    System.out.println("[SessionJetPipeline] Session ID: " + sessionId
-                                                            + " (getAttributes() parsing)");
-                                                }
-                                            } catch (NoSuchMethodException e2) {
-                                                // 3. 필드를 모두 뒤져서 Map 타입의 필드를 찾아 속성 추출 시도
-                                                boolean found = false;
-                                                for (java.lang.reflect.Field field : value.getClass()
-                                                        .getDeclaredFields()) {
-                                                    if (java.util.Map.class.isAssignableFrom(field.getType())) {
-                                                        field.setAccessible(true);
-                                                        java.util.Map<?, ?> attrs = (java.util.Map<?, ?>) field
-                                                                .get(value);
-                                                        if (attrs != null) {
-                                                            rLogin = attrs.get("LOGIN");
-                                                            rLoginType = attrs.get("LOGIN_TYPE");
-                                                            rUserInfo = attrs.get("USER_INFO");
-                                                            System.out.println("[SessionJetPipeline] Session ID: "
-                                                                    + sessionId + " (Field '" + field.getName()
-                                                                    + "' parsing)");
-                                                            found = true;
-                                                            break;
-                                                        }
-                                                    }
-                                                }
-                                                if (!found) {
-                                                    System.out.println(
-                                                            "[SessionJetPipeline] Value has no Map fields nor getAttribute methods: "
-                                                                    + value.getClass().getName());
-                                                }
-                                            }
-                                        }
-                                    }
-                                } catch (Exception e) {
-                                    System.out.println("[SessionJetPipeline] Exception during attribute parsing: "
-                                            + e.getMessage());
-                                }
-
-                                String newLogin = extractStringValue(rLogin);
-                                String newLoginType = extractStringValue(rLoginType);
-                                String newUserInfo = extractStringValue(rUserInfo);
-
-                                System.out.println("[SessionJetPipeline] Extracted -> LOGIN: " + newLogin
-                                        + ", LOGIN_TYPE: " + newLoginType + ", USER_INFO: " + newUserInfo);
-
                                 boolean wasCompleteBefore = sessionInfo.isComplete();
 
-                                // 상태 업데이트
-                                sessionInfo.update(newLogin, newLoginType, newUserInfo);
+                                // 상태 업데이트 (기존에는 역직렬화를 여기서 수행했으나, 이제 미리 파싱된 값을 받음)
+                                sessionInfo.update(event.rLogin, event.rLoginType, event.rUserInfo);
 
                                 // 처음 완성된 상태인지 체크 후 플래그 변경
                                 boolean isNewLogin = false;
@@ -221,16 +185,6 @@ public class SessionJetPipelineConfig {
                     pojo.setSessionId(dto.sessionId);
                     return pojo;
                 }));
-
-        // ObjectMapper를 노드별로 한 번만 생성하여 재사용하기 위한 Jet ServiceFactory 구성
-        com.hazelcast.jet.pipeline.ServiceFactory<?, com.fasterxml.jackson.databind.ObjectMapper> mapperService = com.hazelcast.jet.pipeline.ServiceFactories
-                .sharedService(ctx -> {
-                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
-                    mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
-                    mapper.configure(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES,
-                            false);
-                    return mapper;
-                });
 
         // EventTransport -> sessionDto 파싱 및 운반용 래퍼로 변환
         StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(mapperService, (mapper, dto) -> {
@@ -335,45 +289,50 @@ public class SessionJetPipelineConfig {
         return p;
     }
 
-    private static String extractStringValue(Object value) {
-        if (value == null)
+    private static volatile java.lang.reflect.Method sessionStateGetAttributesMethod = null;
+
+    private static java.util.Map<?, ?> extractSessionStateAttributes(Object sessionStateValue) {
+        if (sessionStateValue == null)
             return null;
-        if (value.getClass().getName().contains("HeapData")
-                || value.getClass().getName().contains("serialization.Data")) {
-            try {
-                java.util.Iterator<HazelcastInstance> it = com.hazelcast.core.Hazelcast.getAllHazelcastInstances()
-                        .iterator();
-                if (it.hasNext()) {
-                    HazelcastInstance hz = it.next();
-                    java.lang.reflect.Method getSsMethod = null;
-                    for (java.lang.reflect.Method m : hz.getClass().getMethods()) {
-                        if (m.getName().equals("getSerializationService")) {
-                            getSsMethod = m;
-                            break;
-                        }
-                    }
-                    if (getSsMethod != null) {
-                        Object ss = getSsMethod.invoke(hz);
-                        if (ss != null) {
-                            java.lang.reflect.Method toObjectMethod = null;
-                            for (java.lang.reflect.Method m : ss.getClass().getMethods()) {
-                                if (m.getName().equals("toObject") && m.getParameterCount() == 1) {
-                                    toObjectMethod = m;
-                                    break;
-                                }
-                            }
-                            if (toObjectMethod != null) {
-                                Object deserialized = toObjectMethod.invoke(ss, value);
-                                return deserialized == null ? null : String.valueOf(deserialized);
-                            }
-                        }
+        try {
+            if (sessionStateGetAttributesMethod == null) {
+                synchronized (SessionJetPipelineConfig.class) {
+                    if (sessionStateGetAttributesMethod == null) {
+                        sessionStateGetAttributesMethod = sessionStateValue.getClass().getMethod("getAttributes");
                     }
                 }
-            } catch (Exception e) {
-                log.warn("Failed to deserialize Data object", e);
+            }
+            Object attrs = sessionStateGetAttributesMethod.invoke(sessionStateValue);
+            if (attrs instanceof java.util.Map) {
+                return (java.util.Map<?, ?>) attrs;
+            }
+        } catch (Exception e) {
+            log.trace("Failed to extract attributes from SessionState", e);
+        }
+        return null;
+    }
+
+    private static Object deserializeObject(com.hazelcast.internal.serialization.SerializationService ss,
+            Object source) {
+        if (source == null)
+            return null;
+        if (source.getClass().getName().contains("HeapData")
+                || source.getClass().getName().contains("serialization.Data")) {
+            if (ss != null) {
+                try {
+                    return ss.toObject(source);
+                } catch (Exception e) {
+                    log.warn("Failed to deserialize Object in Jet pipeline", e);
+                }
             }
         }
-        return String.valueOf(value);
+        return source;
+    }
+
+    private static String deserializeString(com.hazelcast.internal.serialization.SerializationService ss,
+            Object source) {
+        Object obj = deserializeObject(ss, source);
+        return obj == null ? null : String.valueOf(obj);
     }
 
     // 상태 관리용 내부 클래스
@@ -387,13 +346,16 @@ public class SessionJetPipelineConfig {
             return login != null && loginType != null && userInfo != null;
         }
 
-        public void update(String newLogin, String newLoginType, String newUserInfo) {
-            if (newLogin != null)
-                this.login = newLogin;
-            if (newLoginType != null)
-                this.loginType = newLoginType;
-            if (newUserInfo != null)
-                this.userInfo = newUserInfo;
+        public void update(String rLogin, String rLoginType, String rUserInfo) {
+            System.out.println("[SessionJetPipeline] Extracted -> LOGIN: " + rLogin
+                    + ", LOGIN_TYPE: " + rLoginType + ", USER_INFO: " + rUserInfo);
+
+            if (rLogin != null)
+                this.login = rLogin;
+            if (rLoginType != null)
+                this.loginType = rLoginType;
+            if (rUserInfo != null)
+                this.userInfo = rUserInfo;
         }
     }
 
@@ -421,6 +383,31 @@ public class SessionJetPipelineConfig {
 
         public boolean isComplete() {
             return login != null && loginType != null && userInfo != null;
+        }
+    }
+
+    // 1.5단계 역직렬화 결과를 담는 중간 DTO
+    public static class ExtractedSessionEvent implements java.io.Serializable {
+        public String sessionId;
+        public boolean isLogout;
+        public String rLogin;
+        public String rLoginType;
+        public String rUserInfo;
+
+        public ExtractedSessionEvent() {
+        }
+
+        public ExtractedSessionEvent(String sessionId, boolean isLogout, String rLogin, String rLoginType,
+                String rUserInfo) {
+            this.sessionId = sessionId;
+            this.isLogout = isLogout;
+            this.rLogin = rLogin;
+            this.rLoginType = rLoginType;
+            this.rUserInfo = rUserInfo;
+        }
+
+        public String getSessionId() {
+            return sessionId;
         }
     }
 

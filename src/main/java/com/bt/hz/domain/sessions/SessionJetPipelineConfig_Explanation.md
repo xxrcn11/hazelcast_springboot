@@ -75,3 +75,23 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
    - **4단계 (`M_SYSSE002I`)**: 최신 값으로 파싱된 `SessionDto` 객체 자체를 통째로 반환하여 완전히 교체합니다.
    - **5단계 (`M_SYSSE014I`)**: 마찬가지로 로그인되어 있는 상태(업데이트 포함)라면 변경된 최신 `SessionDto`를 씌운 새 POJO를 반환하여 최신 상태로 반영합니다.
 4. **카운트 중복 방지**: 6단계 `M_SYSSE015I`는 `isNewLogin == false`인 이벤트에 대해서는 집계하지 않고 기존 카운트(`oldValue`)를 그대로 유지하므로, 단순 정보 업데이트 이벤트로 인해 카운트가 중복 상승하는 부작용이 없습니다.
+
+---
+
+## 6. (부록) SessionState 직접 캐스팅 및 데이터 복원 방법
+
+만약 `bt_sessions` 맵에서 꺼낸 `event.getNewValue()`를 리플렉션 없이 강제로 `com.hazelcast.web.SessionState` 타입으로 캐스팅했을 때, 내부의 직렬화된 데이터 속성(`USER_INFO` 등)을 원래 값(객체나 문자열)으로 복원하는 방법은 크게 세 가지로 요약할 수 있습니다.
+
+### 방법 1: `SerializationService`를 이용한 정석 복원 (현재 코드 유사 방식 / 권장)
+* **원리**: `SessionState`에서 속성을 꺼낸 값이 Hazelcast 내부 포맷(`Data` 또는 `HeapData`)일 경우, 인스턴스의 `SerializationService.toObject(data)`를 호출하여 원본 객체로 역직렬화합니다.
+* **장단점**: 어떤 직렬화 방식(Portable, Kryo 등)으로 압축되었든 Hazelcast가 알아서 정확히 복원해주므로 가장 안정적이고 호환성이 높습니다. 단, `HazelcastInstance` 객체에 접근해야 하므로 익명 함수 내 클로저 캡처링 등의 선행 작업이 필요할 수 있습니다.
+
+### 방법 2: Spring Session 기본 Serializer 직접 호출
+* **원리**: Spring 환경(`spring-session-hazelcast`)이라면, 속성 값이 바이트 배열 등으로 들어있을 때 Spring 단에 등록된 커스텀 Deserializer(예: `JdkSerializationRedisSerializer`, `GenericJackson2JsonRedisSerializer`)를 명시적으로 가져와 `deserialize(bytes)`를 호출합니다.
+* **장단점**: Spring Session이 자체 커스텀한 직렬화 전략과 100% 동일하게 복원 가능합니다. 하지만 Spring 및 직렬화 설정과 강하게 결합되어 환경이 바뀌면 파이프라인 코드도 대대적으로 수정해야 하는 위험이 있습니다.
+
+### 방법 3: 강제 문자열 변환 후 JSON 구조 해석 (ObjectMapper Tree Parsing)
+* **원리**: 꺼낸 값을 강제로 `String.valueOf()`나 UTF-8 문자열로 변환한 뒤, 그 안에 JSON 형태의 흔적이 보인다면 `ObjectMapper.readTree(json)` 등을 이용해 속성(`userId` 등)을 수동으로 파싱합니다.
+* **장단점**: 프레임워크나 직렬화 엔진에 대한 이해 없이도 무식하지만 직관적으로 데이터를 우회 추출할 수 있습니다. 하지만 특정 직렬화 전략(바이너리나 압축 포맷)에서는 문자열이 완전히 깨져버리므로 아예 사용할 수 없는 치명적인 한계가 존재합니다.
+
+따라서 파이프라인 노드 환경에서는 **방법 1(`SerializationService.toObject()`)**을 활용하는 것이 데이터 유실을 막는 가장 안전한 방법입니다.
