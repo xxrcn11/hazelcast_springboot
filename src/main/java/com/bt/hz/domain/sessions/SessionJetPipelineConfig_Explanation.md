@@ -95,3 +95,45 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
 * **장단점**: 프레임워크나 직렬화 엔진에 대한 이해 없이도 무식하지만 직관적으로 데이터를 우회 추출할 수 있습니다. 하지만 특정 직렬화 전략(바이너리나 압축 포맷)에서는 문자열이 완전히 깨져버리므로 아예 사용할 수 없는 치명적인 한계가 존재합니다.
 
 따라서 파이프라인 노드 환경에서는 **방법 1(`SerializationService.toObject()`)**을 활용하는 것이 데이터 유실을 막는 가장 안전한 방법입니다.
+
+---
+
+## 7. (부록) Hazelcast Jet 파이프라인 환경에서의 로깅 베스트 프랙티스
+
+분산 시스템 및 Spring Boot 환경에서 파이프라인 요소에 로그를 남기는 방식인 `System.out.println`, `static final Logger`, `@Slf4j` 세 가지를 비교 분석하고, Jet 파이프라인 특성에 맞는 최적의 로깅 방식을 안내합니다.
+
+### 7.1. 로깅 방식 비교
+
+1. **`System.out.println` (표준 출력)**
+    * **과거 코드 (`peek` 블럭 내부 등)에서 사용되던 방식입니다.**
+    * **장단점**: 람다 내부에서 외부 객체를 참조하지 않아 직렬화 에러를 유발하지 않고 즉시 결과를 볼 수 있는 장점이 있습니다. 하지만 모든 스레드가 거쳐야 하는 병목을 발생시켜 **치명적인 성능 저하**를 유발하며, 로그 레벨(INFO/DEBUG) 통제가 불가능합니다. 또한 분산 환경에서는 어느 노드의 콘솔에 출력될지 알 수 없어 파편화됩니다.
+
+2. **`static final Logger log = LoggerFactory.getLogger(...)` (표준 SLF4J)**
+    * **장단점**: 비동기 로깅으로 성능 저하가 적고 로그 레벨 제어가 가능합니다. 하지만 Jet 파이프라인이 클러스터 노드로 람다를 직렬화하여 전송할 때, 람다 내부에서 클래스 레벨의 `log` 인스턴스를 참조하면 **`NotSerializableException`** 에러가 발생할 위험이 있습니다. 
+
+3. **`@Slf4j` (Lombok 어노테이션)**
+    * **현재 스프링 빈 초기화 영역(`initPipeline()`) 등에서 널리 쓰이는 방식입니다.**
+    * **장단점**: 로컬(스프링 컨텍스트)에서 수행되는 클래스 밖 영역에서는 완벽하지만, 분산 노드로 배포되는 분산 익명 람다 내부에서 `log.info()` 등을 호출하게 되면 2번과 완전히 동일한 직렬화 문제를 일으킵니다.
+
+### 7.2. 결론 및 적용 가이드
+
+Jet 파이프라인을 작성할 때는 로깅 발생 위치(로컬 vs 분산 워커)를 명확히 나누어 접근해야 합니다.
+
+* **파이프라인 세팅 & 외곽 메서드 (`initPipeline` 등)**
+   * 빈 초기화 영역이므로 `@Slf4j`를 적극 사용하여 `log.info(...)` 형태로 작성합니다.
+* **파이프라인 실행 람다 내부 (`peek`, `map`, `filter` 블럭 안)**
+   * 파이프라인 성능 저하와 JVM 직렬화 에러를 모두 피하기 위해서는, **해당 워커 노드의 로컬 인스턴스 안에서만 지연 초기화(Lazy init)** 하여 Logger를 직접 획득하는 방식을 사용해야 합니다.
+
+**개선 및 적용된 예시 (파이프라인 내부 `peek` 단계)**
+```java
+// 개선된 Jet 파이프라인용 로깅 방식 (직렬화 우회 및 성능 최적화)
+.peek(e -> {
+    org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+    if (l.isDebugEnabled()) {
+        l.debug("[SessionJetPipeline] Step 1 - Key: {}, Type: {}, Value: {}", 
+                     e.getKey(), e.getType(), e.getNewValue());
+    }
+    return null; // Jet 특유의 콘솔 강제 중복 출력 방지
+})
+```
+*실운영 환경에서는 이와 같이 `isDebugEnabled()` 판단과 `log.debug` 조합에 더해(Jet 중복 방지 `null` 리턴 포함) 파이프라인 처리 속도의 저하를 방지해야 합니다.*

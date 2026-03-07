@@ -83,10 +83,12 @@ public class SessionJetPipelineConfig {
                         (EventJournalMapEvent<String, Object> e) -> true))
                 .withIngestionTimestamps()
                 .peek(e -> {
-                    String msg = String.format("[SessionJetPipeline] Step 1 - Key: %s, Type: %s, Value: %s", e.getKey(),
-                            e.getType(), e.getNewValue());
-                    System.out.println(msg);
-                    return msg;
+                    org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+                    if (l.isDebugEnabled()) {
+                        l.debug("[SessionJetPipeline] Step 1 - Key: {}, Type: {}, Value: {}", e.getKey(), e.getType(),
+                                e.getNewValue());
+                    }
+                    return null;
                 });
 
         // 1.5단계 : 역직렬화 수행 (노드별로 공유되는 SerializationService 활용)
@@ -134,11 +136,11 @@ public class SessionJetPipelineConfig {
                                     isNewLogin = true;
                                 }
 
-                                System.out
-                                        .println("[SessionJetPipeline] Session State Complete? "
-                                                + sessionInfo.isComplete() +
-                                                ", isNewLogin? " + isNewLogin +
-                                                ", isCountProcessed? " + sessionInfo.isCountProcessed);
+                                org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+                                if (l.isDebugEnabled()) {
+                                    l.debug("[SessionJetPipeline] Session State Complete? {}, isNewLogin? {}, isCountProcessed? {}",
+                                            sessionInfo.isComplete(), isNewLogin, sessionInfo.isCountProcessed);
+                                }
 
                                 // 완성된 상태만 전달, 미완성 상태면 기록만 하고 스트림으로 내리지 않음 (null 반환)
                                 if (sessionInfo.isComplete()) {
@@ -161,14 +163,12 @@ public class SessionJetPipelineConfig {
 
         // 3단계 : 추출된 값들을 M_SYSSE001I 맵에 반영 (로그아웃 시 삭제, 완성된 정보만 업데이트)
         parsedStream.peek(dto -> {
-            String msg = "[SessionJetPipeline] Step 3 Input -> Session ID: " + dto.sessionId +
-                    ", isLogout: " + dto.isLogout +
-                    ", isComplete: " + dto.isComplete() +
-                    ", login: " + dto.login +
-                    ", loginType: " + dto.loginType +
-                    ", userInfo: " + dto.userInfo;
-            System.out.println(msg);
-            return msg;
+            org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+            if (l.isDebugEnabled()) {
+                l.debug("[SessionJetPipeline] Step 3 Input -> Session ID: {}, isLogout: {}, isComplete: {}, login: {}, loginType: {}, userInfo: {}",
+                        dto.sessionId, dto.isLogout, dto.isComplete(), dto.login, dto.loginType, dto.userInfo);
+            }
+            return null;
         }).writeTo(Sinks.mapWithUpdating(
                 "M_SYSSE001I",
                 dto -> dto.sessionId,
@@ -245,11 +245,12 @@ public class SessionJetPipelineConfig {
 
         // 6단계 : M_SYSSE015I 맵 (시간대별 로그인 수 집계)
         wrapperStream.peek(wrapper -> {
-            String msg = "[SessionJetPipeline] Step 6 Input -> Session ID: " + wrapper.transport.sessionId +
-                    ", isLogout: " + wrapper.transport.isLogout +
-                    ", isNewLogin: " + wrapper.transport.isNewLogin;
-            System.out.println(msg);
-            return msg;
+            org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+            if (l.isDebugEnabled()) {
+                l.debug("[SessionJetPipeline] Step 6 Input -> Session ID: {}, isLogout: {}, isNewLogin: {}",
+                        wrapper.transport.sessionId, wrapper.transport.isLogout, wrapper.transport.isNewLogin);
+            }
+            return null;
         }).writeTo(Sinks.mapWithUpdating(
                 "M_SYSSE015I",
                 wrapper -> {
@@ -347,8 +348,11 @@ public class SessionJetPipelineConfig {
         }
 
         public void update(String rLogin, String rLoginType, String rUserInfo) {
-            System.out.println("[SessionJetPipeline] Extracted -> LOGIN: " + rLogin
-                    + ", LOGIN_TYPE: " + rLoginType + ", USER_INFO: " + rUserInfo);
+            org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+            if (l.isDebugEnabled()) {
+                l.debug("[SessionJetPipeline] Extracted -> LOGIN: {}, LOGIN_TYPE: {}, USER_INFO: {}", rLogin,
+                        rLoginType, rUserInfo);
+            }
 
             if (rLogin != null)
                 this.login = rLogin;
