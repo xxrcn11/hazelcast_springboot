@@ -21,8 +21,10 @@ import lombok.Setter;
 public class SessionDto implements IdentifiedDataSerializable, java.io.Serializable {
 
     private String userId;
-    private String username;
+    private String userName;
     private String role; // 단순화를 위해 단일 롤 (ADMIN/USER 등)
+    private long num;
+    private int age;
     private String loginAt;
 
     @Override
@@ -38,16 +40,20 @@ public class SessionDto implements IdentifiedDataSerializable, java.io.Serializa
     @Override
     public void writeData(ObjectDataOutput out) throws IOException {
         out.writeString(userId);
-        out.writeString(username);
+        out.writeString(userName);
         out.writeString(role);
+        out.writeLong(num);
+        out.writeInt(age);
         out.writeString(loginAt);
     }
 
     @Override
     public void readData(ObjectDataInput in) throws IOException {
         userId = in.readString();
-        username = in.readString();
+        userName = in.readString();
         role = in.readString();
+        num = in.readLong();
+        age = in.readInt();
         loginAt = in.readString();
     }
 

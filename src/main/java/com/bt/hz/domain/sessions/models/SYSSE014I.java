@@ -1,7 +1,6 @@
 package com.bt.hz.domain.sessions.models;
 
 import java.io.IOException;
-import java.time.LocalDateTime;
 
 import com.bt.hz.config.ServerDataSerializableFactory;
 import com.hazelcast.nio.ObjectDataInput;
@@ -22,9 +21,11 @@ import lombok.Setter;
 public class SYSSE014I implements IdentifiedDataSerializable {
 
     private String userId;
-    private String username;
+    private String userName;
     private String role;
     private String loginType;
+    private long num;
+    private int age;
     private String loginAt;
     private String logoutAt;
 
@@ -41,9 +42,11 @@ public class SYSSE014I implements IdentifiedDataSerializable {
     @Override
     public void writeData(ObjectDataOutput out) throws IOException {
         out.writeString(userId);
-        out.writeString(username);
+        out.writeString(userName);
         out.writeString(role);
         out.writeString(loginType);
+        out.writeLong(num);
+        out.writeInt(age);
         out.writeString(loginAt);
         out.writeString(logoutAt);
 
@@ -52,9 +55,11 @@ public class SYSSE014I implements IdentifiedDataSerializable {
     @Override
     public void readData(ObjectDataInput in) throws IOException {
         userId = in.readString();
-        username = in.readString();
+        userName = in.readString();
         role = in.readString();
         loginType = in.readString();
+        num = in.readLong();
+        age = in.readInt();
         loginAt = in.readString();
         logoutAt = in.readString();
 

@@ -56,8 +56,15 @@ public class SessionJetPipelineConfig {
         // 1. 역직렬화를 위한 SerializationService 팩토리
         com.hazelcast.jet.pipeline.ServiceFactory<?, com.hazelcast.internal.serialization.SerializationService> ssFactory = com.hazelcast.jet.pipeline.ServiceFactories
                 .sharedService(ctx -> {
-                    return ((com.hazelcast.instance.impl.HazelcastInstanceProxy) ctx.hazelcastInstance())
-                            .getSerializationService();
+                    HazelcastInstance hz = ctx.hazelcastInstance();
+                    if (hz instanceof com.hazelcast.instance.impl.HazelcastInstanceProxy) {
+                        return ((com.hazelcast.instance.impl.HazelcastInstanceProxy) hz).getSerializationService();
+                    } else if (hz instanceof com.hazelcast.instance.impl.HazelcastInstanceImpl) {
+                        return ((com.hazelcast.instance.impl.HazelcastInstanceImpl) hz).getSerializationService();
+                    } else {
+                        throw new IllegalStateException(
+                                "Unsupported HazelcastInstance type: " + hz.getClass().getName());
+                    }
                 });
 
         // 2. ObjectMapper를 노드별로 한 번만 생성하여 재사용하기 위한 팩토리
@@ -232,8 +239,10 @@ public class SessionJetPipelineConfig {
                         com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
                         com.bt.hz.domain.sessions.models.SYSSE014I pojo = new com.bt.hz.domain.sessions.models.SYSSE014I();
                         pojo.setUserId(userDto.getUserId());
-                        pojo.setUsername(userDto.getUsername());
+                        pojo.setUserName(userDto.getUserName());
                         pojo.setRole(userDto.getRole());
+                        pojo.setNum(userDto.getNum());
+                        pojo.setAge(userDto.getAge());
                         if (userDto.getLoginAt() != null) {
                             pojo.setLoginAt(userDto.getLoginAt());
                         }

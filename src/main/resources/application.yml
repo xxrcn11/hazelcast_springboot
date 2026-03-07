@@ -17,5 +17,6 @@ mybatis:
 
 logging:
   level:
+    com.bt.hz.domain.sessions.SessionJetPipelineConfig: DEBUG
     com.hazelcast.jet.impl.pipeline.TransformP: WARN
     com.hazelcast.jet.impl.pipeline.TransformUsingServiceP: WARN

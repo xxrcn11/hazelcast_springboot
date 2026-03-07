@@ -46,8 +46,10 @@ public final class MappingSQLs {
         public static final String CREATE_MAPPING_SESSION_M_SYSSE002I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE002I (" +
                         "    __key VARCHAR," +
                         "    userId VARCHAR," +
-                        "    username VARCHAR," +
+                        "    userName VARCHAR," +
                         "    role VARCHAR," +
+                        "    num BIGINT," +
+                        "    age INTEGER," +
                         "    loginAt VARCHAR" +
                         ") " +
                         "TYPE IMap " +
@@ -61,8 +63,10 @@ public final class MappingSQLs {
         public static final String CREATE_MAPPING_SESSION_M_SYSSE014I_IMAP = "CREATE OR REPLACE MAPPING M_SYSSE014I (" +
                         "    __key VARCHAR," +
                         "    userId VARCHAR," +
-                        "    username VARCHAR," +
+                        "    userName VARCHAR," +
                         "    role VARCHAR," +
+                        "    num BIGINT," +
+                        "    age INTEGER," +
                         "    loginAt VARCHAR," +
                         "    loginType VARCHAR," +
                         "    logoutAt VARCHAR" +
