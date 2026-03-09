@@ -253,6 +253,7 @@ public class SessionJetPipelineConfig {
                 }));
 
         // 6단계 : M_SYSSE015I 맵 (시간대별 로그인 수 집계)
+        // mapWithEntryProcessor를 사용하여 외부 스케줄러의 EntryProcessor와 파티션 레벨에서 직렬화되어 원자적으로 실행됨
         wrapperStream.peek(wrapper -> {
             org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
             if (l.isDebugEnabled()) {
@@ -260,40 +261,39 @@ public class SessionJetPipelineConfig {
                         wrapper.transport.sessionId, wrapper.transport.isLogout, wrapper.transport.isNewLogin);
             }
             return null;
-        }).writeTo(Sinks.mapWithUpdating(
+        }).writeTo(Sinks.mapWithEntryProcessor(
                 "M_SYSSE015I",
                 wrapper -> {
                     com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
                     if (userDto != null && userDto.getLoginAt() != null && userDto.getLoginAt().length() >= 10) {
                         String loginAt = userDto.getLoginAt();
-                        String ymd = loginAt.substring(0, 8); // yyyyMMdd
-                        String hour = loginAt.substring(8, 10); // HH
-                        return ymd + "_" + hour;
+                        return loginAt.substring(0, 8) + "_" + loginAt.substring(8, 10);
                     }
                     return "UNKNOWN_TIME";
                 },
-                (com.bt.hz.domain.sessions.models.SYSSE015I oldValue, SessionEventWrapper wrapper) -> {
-                    // 로그아웃이거나 카운트 대상(완성된 최초 로그인)이 아니면 기존 값 유지 (no-op)
-                    if (wrapper.transport.isLogout || !wrapper.transport.isNewLogin) {
-                        return oldValue;
+                wrapper -> {
+                    String ymd = "UNKNOWN";
+                    String hour = "UNKNOWN";
+                    com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
+                    if (userDto != null && userDto.getLoginAt() != null && userDto.getLoginAt().length() >= 10) {
+                        String loginAt = userDto.getLoginAt();
+                        ymd = loginAt.substring(0, 8);
+                        hour = loginAt.substring(8, 10);
                     }
-
-                    // 카운트 가능한 신규 로그인인 경우
-                    if (oldValue == null) {
-                        com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
-                        String ymd = "UNKNOWN";
-                        String hour = "UNKNOWN";
-                        if (userDto != null && userDto.getLoginAt() != null && userDto.getLoginAt().length() >= 10) {
-                            String loginAt = userDto.getLoginAt();
-                            ymd = loginAt.substring(0, 8); // yyyyMMdd
-                            hour = loginAt.substring(8, 10); // HH
+                    final String fYmd = ymd;
+                    final String fHour = hour;
+                    final boolean noOp = wrapper.transport.isLogout || !wrapper.transport.isNewLogin;
+                    return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE015I, Void>) entry -> {
+                        if (noOp) return null;
+                        com.bt.hz.domain.sessions.models.SYSSE015I current = entry.getValue();
+                        if (current == null) {
+                            entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(fYmd, fHour, 1));
+                        } else {
+                            entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(
+                                    current.getStdYmd(), current.getStdHour(), current.getCnt() + 1));
                         }
-
-                        return new com.bt.hz.domain.sessions.models.SYSSE015I(ymd, hour, 1);
-                    } else {
-                        oldValue.setCnt(oldValue.getCnt() + 1);
-                        return oldValue;
-                    }
+                        return null;
+                    };
                 }));
 
         return p;

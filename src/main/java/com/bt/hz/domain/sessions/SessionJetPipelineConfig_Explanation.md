@@ -10,27 +10,32 @@
 ---
 
 ## 1. 1단계: Source (이벤트 수신)
-`bt_sessions` 맵에서 발생하는 `EventJournalMapEvent`를 시간 순서대로 읽어들이는 최초 단계입니다. 수신되는 이벤트는 Map 자료구조뿐만 아니라 Hazelcast 내부의 직렬화 포맷인 `HeapData` 형태로 들어올 수도 있습니다.
+`bt_sessions` 맵에서 발생하는 `EventJournalMapEvent`를 시간 순서대로 읽어들이는 최초 단계입니다. 수신되는 이벤트는 Map 자료구조뿐만 아니라 Hazelcast 내부의 직렬화 포맷인 `HeapData` 형태로 들어올 수도 있으며, 파이프라인 최적화 로깅 원칙에 따라 DEBUG 모드에서만 상태를 출력합니다.
 
 ---
 
-## 2. 2단계: `mapStateful` (부분 데이터 조립 및 로그아웃 판별)
-단편적으로 쪼개져서 혹은 난해한 직렬화 형태로 들어오는 웹 세션 이벤트들을 하나의 완성된 상태(`SessionInfo`)로 추출 및 조립합니다.
+## 2. 1.5단계: 역직렬화 및 기초 데이터 추출 (`mapUsingService`)
+종종 Hazelcast Web Filter 등으로 생성된 세션 정보가 자바 Map이 아니라 Hazelcast 내부 포맷인 `SessionState`나 `com.hazelcast.nio.serialization.Data` 형태(예: `HeapData`)로 들어올 수 있습니다.
+이 과정의 부하를 줄이기 위해, 파이프라인 외곽에 미리 정의해둔 **`ServiceFactory`(`ssFactory`)를 통해** 클러스터 노드가 공유하는 `SerializationService`를 곧바로 받아와 활용합니다. 과거에는 리플렉션을 통해 동적으로 서비스 객체를 찾았으나, 현재는 `HazelcastInstance`를 직접 캐스팅하여 획득함으로써 구조가 대폭 단순화 되었습니다.
+이 단계에서 추출된 속성(`LOGIN`, `LOGIN_TYPE`, `USER_INFO`)들은 `ExtractedSessionEvent`라는 DTO로 포장되어 다음 단계로 전달됩니다.
 
-### 2.1. 내부 데이터 직렬화/역직렬화 추출 (`extractStringValue`)
-종종 Hazelcast Web Filter 등으로 생성된 세션 정보가 자바 Map이 아니라 Hazelcast 내부 포맷인 `com.hazelcast.nio.serialization.Data` 인터페이스의 인스턴스(예: `HeapData`)로 들어올 수 있습니다. 이를 파싱하기 위해 리플렉션(Reflection)을 이용해 현재 클러스터 인스턴스의 `SerializationService`를 동적으로 가져와 `toObject()`를 호출한 뒤 안전한 `String`으로 캐스팅하는 전처리 과정을 거칩니다.
+---
 
-### 2.2. TTL (상태 유지 시간)
+## 3. 2단계: `mapStateful` (부분 데이터 조립 및 로그아웃 판별)
+단편적으로 쪼개져서 수신되는 1.5단계의 역직렬화 결과들을 세션 ID 기준으로 묶어(groupingKey) 하나의 완성된 상태(`SessionInfo`)로 추출 및 조립합니다. 기존에는 이 단계에서 역직렬화까지 수행했지만 현재는 상태 관리 및 응집에만 집중합니다.
+
+### 3.1. TTL (상태 유지 시간)
 ```java
 java.util.concurrent.TimeUnit.HOURS.toMillis(11)
 ```
 * **역할**: Jet 엔진이 특정 세션(`sessionId`)의 메모리 상태를 얼마나 오랫동안 보관할지 결정합니다. (`bt_sessions` 맵의 TTL 10시간보다 넉넉하게 설정)
 
-### 2.3. 매핑 함수 조립 및 조기 방출 차단
-* **로그아웃/만료 감지**: 이벤트 타입이 `REMOVED` 거나 `EXPIRED`인 경우 `isLogout=true`인 신호를 방출합니다.
+### 3.2. 매핑 함수 조립 및 조기 방출 차단
+* **로그아웃/만료 감지**: 전송된 이벤트에 `isLogout=true` 신호가 켜져 있으면 로그아웃으로 판별하여 즉시 다음으로 넘깁니다.
+* **상태 업데이트**: 수신한 부분 이벤트의 정보들을 통해 기존 상태에 `update`를 호출합니다.
 * **완성 상태(Complete) 검증**: 추출된 `LOGIN`, `LOGIN_TYPE`, `USER_INFO` 세 가지 정보가 모두 수집되어야만 완성된 상태(`isComplete() == true`)로 판별합니다.
-* **중복 카운트 방지 (`isNewLogin`)**: `sessionId`별로 메모리에 유지되는 `SessionInfo`의 이전 상태를 검사합니다. 방금 막 처음으로 필수 3가지 값이 모두 모여 완성되었다면, `isNewLogin = true` 플래그를 세팅하여 단 1회만 하위 스트림으로 내보냅니다. (이 플래그 덕분에 6단계에서 이벤트가 여러 번 나뉘어 들어와도 카운트가 `1`만 증가하게 됩니다)
-* **조기 방출 차단 (최적화)**: `state.isComplete()`가 `false`라면 `null`을 리턴하여 이벤트가 하위 스트림으로 흘러가는 것을 원천 차단합니다.
+* **중복 카운트 방지 (`isNewLogin`)**: `sessionId`별로 메모리에 유지되는 `SessionInfo`의 이전 상태를 검사합니다. 방금 막 처음으로 필수 3가지 값이 모두 모여 완성되었다면, `isNewLogin = true` 플래그를 세팅하여 단 1회만 하위 스트림으로 내보냅니다. (이 플래그 덕분에 하위 집계 단계에서 이벤트가 여러 번 나뉘어 들어와도 카운트가 중복 상승하지 않습니다)
+* **조기 방출 차단 (최적화)**: `sessionInfo.isComplete()`가 `false`라면 `null`을 리턴하여, 미완성 이벤트가 하위 스트림으로 흘러가는 것을 원천 차단합니다.
 
 ---
 
