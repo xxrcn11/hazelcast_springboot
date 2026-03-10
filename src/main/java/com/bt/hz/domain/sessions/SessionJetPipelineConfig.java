@@ -221,6 +221,8 @@ public class SessionJetPipelineConfig {
                 }));
 
         // 5단계 : M_SYSSE014I 맵 (Hazelcast SQL 지원을 위한 POJO 타입 저장)
+        // 외부의 concurrent wirte가 없다면 현재 상태 유지하고 있다면 6단계처럼 mapWithEntryProcessor를 사용하는
+        // 방법으로 수정할 것!
         wrapperStream.writeTo(Sinks.mapWithUpdating(
                 "M_SYSSE014I",
                 wrapper -> wrapper.transport.sessionId,
@@ -284,7 +286,8 @@ public class SessionJetPipelineConfig {
                     final String fHour = hour;
                     final boolean noOp = wrapper.transport.isLogout || !wrapper.transport.isNewLogin;
                     return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE015I, Void>) entry -> {
-                        if (noOp) return null;
+                        if (noOp)
+                            return null;
                         com.bt.hz.domain.sessions.models.SYSSE015I current = entry.getValue();
                         if (current == null) {
                             entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(fYmd, fHour, 1));

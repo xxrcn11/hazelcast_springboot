@@ -87,6 +87,9 @@ public class SpringBootStrapListener implements LifecycleListener {
                             .getBean(com.bt.hz.domain.sessions.SessionJetPipelineConfig.class);
                     jetPipeline.initPipeline();
 
+                    // M_SYSSE015I 시간별 카운팅 스케줄러 등록 (Hazelcast IScheduledExecutorService)
+                    com.bt.hz.domain.sessions.MSYSSE015IScheduler.register(hzInstance);
+
                     // 테스트 데이터 주입
                     java.util.Map<String, String> data = new java.util.HashMap<>();
                     data.put("LOGIN", "test_login");
