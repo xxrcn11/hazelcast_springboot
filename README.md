@@ -31,7 +31,7 @@ java.util.concurrent.TimeUnit.HOURS.toMillis(11)
 * **역할**: Jet 엔진이 특정 세션(`sessionId`)의 메모리 상태를 얼마나 오랫동안 보관할지 결정합니다. (`bt_sessions` 맵의 TTL 10시간보다 넉넉하게 설정)
 
 ### 3.2. 매핑 함수 조립 및 조기 방출 차단
-* **로그아웃/만료 감지**: 전송된 이벤트에 `isLogout=true` 신호가 켜져 있으면 로그아웃으로 판별하여 즉시 다음으로 넘깁니다.
+* **로그아웃/만료 감지**: 전송된 이벤트에 `isLogout=true` 또는 `REMOVED/EXPIRED` 타입이 감지되면 로그아웃으로 판별합니다. 이때 **`sessionInfo.clear()`를 호출하여 상태를 초기화**하고, `isLoggedOut = true`라는 **Sticky Flag(고스트 업데이트 차단용)**를 설정하여 하위로 내보냅니다.
 * **상태 업데이트**: 수신한 부분 이벤트의 정보들을 통해 기존 상태에 `update`를 호출합니다.
 * **완성 상태(Complete) 검증**: 추출된 `LOGIN`, `LOGIN_TYPE`, `USER_INFO` 세 가지 정보가 모두 수집되어야만 완성된 상태(`isComplete() == true`)로 판별합니다.
 * **중복 카운트 방지 (`isNewLogin`)**: `sessionId`별로 메모리에 유지되는 `SessionInfo`의 이전 상태를 검사합니다. 방금 막 처음으로 필수 3가지 값이 모두 모여 완성되었다면, `isNewLogin = true` 플래그를 세팅하여 단 1회만 하위 스트림으로 내보냅니다. (이 플래그 덕분에 하위 집계 단계에서 이벤트가 여러 번 나뉘어 들어와도 카운트가 중복 상승하지 않습니다)
@@ -73,8 +73,10 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
 
 ### 5.1. 동작 원리
 1. **이벤트 감지**: 1단계 Source(`EventJournalMapEvent`)는 `ADDED` 이벤트 뿐만 아니라 `UPDATED` 이벤트도 모두 캡처하여 스트림으로 흘려보냅니다.
-2. **상태 갱신**: 2단계 `mapStateful` 연산자는 `sessionId`를 키로 하여 기존에 쥐고 있던 메모리 객체(`SessionInfo`)를 꺼낸 뒤, 추출된 최신 값으로 업데이트(`state.update()`)합니다.
-   > ⚠️ 이때 이미 이전에 1회 완성되었던 세션이므로 `isNewLogin = false`로 마킹되어 하위로 내려갑니다.
+2. **상태 갱신 및 차단 로직**: 2단계 `mapStateful` 연산자는 `sessionId`를 키로 하여 기존에 쥐고 있던 메모리 객체(`SessionInfo`)를 꺼냅니다.
+   - **정상 업데이트**: 이미 완료된 세션에 대한 정보 갱신은 `state.update()`를 통해 반영됩니다. (이때 `isNewLogin = false`로 마킹되어 전파)
+   - **고스트 업데이트(Ghost Update) 차단**: 만약 해당 세션이 이미 로그아웃 처리되어 `isLoggedOut` 플래그가 `true`인 상태에서 들어온 `UPDATED` 이벤트라면, 이를 **무시(Return null)**하여 하위 맵의 데이터가 되살아나는 것을 방지합니다.
+   - **세션 재사용 처리**: 동일 ID로 신규 로그인(`ADDED`)이 들어오면 모든 상태를 리셋하고 `isLoggedOut`을 다시 `false`로 돌려 정상 처리를 시작합니다.
 3. **최신 값 덮어쓰기**:
    - **3단계 (`M_SYSSE001I`)**: 기존 값(`oldValue`)을 무시하고, `wrapper`에서 꺼낸 최신 정보들로 새 POJO를 만들어 반환하므로 최신 상태로 덮어써집니다.
    - **4단계 (`M_SYSSE002I`)**: 최신 값으로 파싱된 `SessionDto` 객체 자체를 통째로 반환하여 완전히 교체합니다.

@@ -104,7 +104,7 @@ public class SessionJetPipelineConfig {
             if (event.getType() == com.hazelcast.core.EntryEventType.REMOVED ||
                     event.getType() == com.hazelcast.core.EntryEventType.EXPIRED ||
                     value == null) {
-                return new ExtractedSessionEvent(event.getKey(), true, null, null, null);
+                return new ExtractedSessionEvent(event.getKey(), true, null, null, null, event.getType());
             }
             java.util.Map<?, ?> attrs = extractSessionStateAttributes(value);
             String login = null;
@@ -115,7 +115,7 @@ public class SessionJetPipelineConfig {
                 loginType = deserializeString(ss, attrs.get("LOGIN_TYPE"));
                 userInfo = deserializeString(ss, attrs.get("USER_INFO"));
             }
-            return new ExtractedSessionEvent(event.getKey(), false, login, loginType, userInfo);
+            return new ExtractedSessionEvent(event.getKey(), false, login, loginType, userInfo, event.getType());
         });
 
         // 2단계 : bt_sessions에 저장된 값들 추출, 부분적으로 들어오는 이벤트를 상태로 모아서 운반
@@ -125,15 +125,38 @@ public class SessionJetPipelineConfig {
                         java.util.concurrent.TimeUnit.HOURS.toMillis(11), // bt_sessions 10시간 TTL 고려하여 여유있게 11시간 설정
                         SessionInfo::new,
                         (sessionInfo, sessionId, event) -> {
-                            // 로그아웃 감지
-                            if (event.isLogout) {
+                            // 1. 로그아웃/만료 감지 (REMOVED, EXPIRED)
+                            if (event.eventType == com.hazelcast.core.EntryEventType.REMOVED ||
+
+                                    event.eventType == com.hazelcast.core.EntryEventType.EXPIRED ||
+                                    event.isLogout) {
+                                sessionInfo.clear();
+                                sessionInfo.isLoggedOut = true; // "이미 로그아웃됨" 마킹 (Sticky Flag)
                                 return new SessionEventTransport(sessionId, null, null, null, true, false);
+                            }
+
+                            // 2. 신규 생성 감지 (ADDED)
+                            if (event.eventType == com.hazelcast.core.EntryEventType.ADDED) {
+                                sessionInfo.clear(); // 혹시 남은 고스트 상태 초기화
+                                sessionInfo.isLoggedOut = false;
+                            }
+
+                            // 3. 업데이트 처리
+                            if (event.eventType == com.hazelcast.core.EntryEventType.UPDATED) {
+                                // 이미 로그아웃된 세션에 대해 나중에 들어온 업데이트(Ghost Update)는 무시
+                                if (sessionInfo.isLoggedOut) {
+                                    org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+                                    if (l.isDebugEnabled()) {
+                                        l.debug("[SessionJetPipeline] Ignoring ghost update for logged out session: {}", sessionId);
+                                    }
+                                    return null;
+                                }
                             }
 
                             try {
                                 boolean wasCompleteBefore = sessionInfo.isComplete();
 
-                                // 상태 업데이트 (기존에는 역직렬화를 여기서 수행했으나, 이제 미리 파싱된 값을 받음)
+                                // 상태 업데이트
                                 sessionInfo.update(event.rLogin, event.rLoginType, event.rUserInfo);
 
                                 // 처음 완성된 상태인지 체크 후 플래그 변경
@@ -149,7 +172,7 @@ public class SessionJetPipelineConfig {
                                             sessionInfo.isComplete(), isNewLogin, sessionInfo.isCountProcessed);
                                 }
 
-                                // 완성된 상태만 전달, 미완성 상태면 기록만 하고 스트림으로 내리지 않음 (null 반환)
+                                // 완성된 상태만 전달
                                 if (sessionInfo.isComplete()) {
                                     return new SessionEventTransport(sessionId, sessionInfo.login,
                                             sessionInfo.loginType,
@@ -354,6 +377,7 @@ public class SessionJetPipelineConfig {
         public String loginType;
         public String userInfo;
         public boolean isCountProcessed; // 5단계 M_SYSSE015I 횟수 카운트를 위해 추가
+        public boolean isLoggedOut; // 로그아웃 이후 고스트 업데이트 차단을 위한 플래그
 
         public boolean isComplete() {
             return login != null && loginType != null && userInfo != null;
@@ -372,6 +396,14 @@ public class SessionJetPipelineConfig {
                 this.loginType = rLoginType;
             if (rUserInfo != null)
                 this.userInfo = rUserInfo;
+        }
+
+        public void clear() {
+            this.login = null;
+            this.loginType = null;
+            this.userInfo = null;
+            this.isCountProcessed = false;
+            this.isLoggedOut = false;
         }
     }
 
@@ -409,17 +441,19 @@ public class SessionJetPipelineConfig {
         public String rLogin;
         public String rLoginType;
         public String rUserInfo;
+        public com.hazelcast.core.EntryEventType eventType;
 
         public ExtractedSessionEvent() {
         }
 
         public ExtractedSessionEvent(String sessionId, boolean isLogout, String rLogin, String rLoginType,
-                String rUserInfo) {
+                String rUserInfo, com.hazelcast.core.EntryEventType eventType) {
             this.sessionId = sessionId;
             this.isLogout = isLogout;
             this.rLogin = rLogin;
             this.rLoginType = rLoginType;
             this.rUserInfo = rUserInfo;
+            this.eventType = eventType;
         }
 
         public String getSessionId() {
