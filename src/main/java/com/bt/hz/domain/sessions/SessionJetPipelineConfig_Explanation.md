@@ -1,6 +1,6 @@
 # Hazelcast Jet Pipeline: Session Event Stream Processing
 
-이 문서는 `SessionJetPipelineConfig.java`에 구현된 Hazelcast Jet 파이프라인의 각 단계별 동작 원리와 핵심 API(`mapStateful`, `Sinks.mapWithUpdating`) 사용 방식 및 핵심 문제 해결 전략에 대한 자세한 설명을 담고 있습니다.
+이 문서는 `SessionJetPipelineConfig.java`에 구현된 Hazelcast Jet 파이프라인의 각 단계별 동작 원리와 핵심 API(`mapStateful`, `Sinks.mapWithEntryProcessor`) 사용 방식 및 핵심 문제 해결 전략에 대한 자세한 설명을 담고 있습니다.
 
 ## 0. Job(파이프라인) 중복 실행 방지
 클러스터 모드(다중 노드)로 기동 시, 각 노드가 스프링부트 올라오는 시점에 파이프라인을 개별적으로 제출하면 동일한 작업을 하는 Jet Job이 클러스터에 N개 등록됩니다. (예: 3대 노드 = 3개 Job)
@@ -48,12 +48,12 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
 
 ---
 
-## 4. 4단계~6단계: `Sinks.mapWithUpdating` (분기 처리형 대상 맵 반영)
+## 4. 4단계~6단계: `Sinks.mapWithEntryProcessor` (분기 처리형 대상 맵 반영)
 2단계에서 판별된 `isLogout` 여부나 `isNewLogin` 플래그를 바탕으로 분기 처리하여 집계 맵들을 업데이트합니다.
 
 ### 4.1. 3단계/4단계: `M_SYSSE001I`, `M_SYSSE002I` (캐싱 목적 맵)
 * **목적**: 파싱된 `SessionDto` 및 `SessionEventTransport` 추출 정보들을 단순히 캐싱하여 SQL 조회가 가능하게 합니다.
-* **동작**: `isLogout` 신호를 받으면 해당 노드를 맵에서 삭제(`null` 리턴)하고, 정상 로그인이면 통째로 맵의 값으로 저장(갱신)합니다.
+* **동작**: `isLogout` 신호를 받으면 해당 노드를 맵에서 삭제(`entry.setValue(null)`)하고, 정상 로그인이면 통째로 맵의 값으로 저장(갱신)합니다.
 
 ### 4.2. 5단계: `M_SYSSE014I` (이력 POJO 업데이트)
 * **목적**: 이력 관리용 POJO이며 특수하게 **로그아웃 시간(`logoutAt`)** 만료 추적을 수행합니다.

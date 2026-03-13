@@ -1,6 +1,6 @@
 # Hazelcast Jet Pipeline: Session Event Stream Processing
 
-이 문서는 `SessionJetPipelineConfig.java`에 구현된 Hazelcast Jet 파이프라인의 각 단계별 동작 원리와 핵심 API(`mapStateful`, `Sinks.mapWithUpdating`) 사용 방식 및 핵심 문제 해결 전략에 대한 자세한 설명을 담고 있습니다.
+이 문서는 `SessionJetPipelineConfig.java`에 구현된 Hazelcast Jet 파이프라인의 각 단계별 동작 원리와 핵심 API(`mapStateful`, `Sinks.mapWithEntryProcessor`) 사용 방식 및 핵심 문제 해결 전략에 대한 자세한 설명을 담고 있습니다.
 
 ## 0. Job(파이프라인) 중복 실행 방지
 클러스터 모드(다중 노드)로 기동 시, 각 노드가 스프링부트 올라오는 시점에 파이프라인을 개별적으로 제출하면 동일한 작업을 하는 Jet Job이 클러스터에 N개 등록됩니다. (예: 3대 노드 = 3개 Job)
@@ -48,12 +48,13 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
 
 ---
 
-## 4. 4단계~6단계: `Sinks.mapWithUpdating` (분기 처리형 대상 맵 반영)
-2단계에서 판별된 `isLogout` 여부나 `isNewLogin` 플래그를 바탕으로 분기 처리하여 집계 맵들을 업데이트합니다.
+## 4. 4단계~6단계: `Sinks.mapWithEntryProcessor` (분기 처리형 대상 맵 반영)
+2단계에서 판별된 `isLogout` 여부나 `isNewLogin` 플래그를 바탕으로 분기 처리하여 집계 맵들을 업데이트합니다. 모든 Sink는 `Sinks.mapWithEntryProcessor`를 사용하여 파티션 레벨에서 원자적으로 실행되며, 외부 스케줄러의 `EntryProcessor`와 경쟁 조건 없이 안전하게 동작합니다.
 
 ### 4.1. 3단계/4단계: `M_SYSSE001I`, `M_SYSSE002I` (캐싱 목적 맵)
 * **목적**: 파싱된 `SessionDto` 및 `SessionEventTransport` 추출 정보들을 단순히 캐싱하여 SQL 조회가 가능하게 합니다.
-* **동작**: `isLogout` 신호를 받으면 해당 노드를 맵에서 삭제(`null` 리턴)하고, 정상 로그인이면 통째로 맵의 값으로 저장(갱신)합니다.
+* **동작**: `isLogout` 신호를 받으면 `entry.setValue(null)`로 해당 엔트리를 삭제하고, 정상 로그인이면 통째로 맵의 값으로 저장(갱신)합니다.
+* **고스트 업데이트 방어**: 엔트리가 이미 삭제된 상태(`entry.getValue() == null`)인데 신규 로그인(`isNewLogin`)도 아닌 업데이트가 도착하면, REMOVE → UPDATE 순서 역전으로 인한 세션 부활을 방지하기 위해 스킵합니다.
 
 ### 4.2. 5단계: `M_SYSSE014I` (이력 POJO 업데이트)
 * **목적**: 이력 관리용 POJO이며 특수하게 **로그아웃 시간(`logoutAt`)** 만료 추적을 수행합니다.
@@ -62,9 +63,10 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
 
 ### 4.3. 6단계: `M_SYSSE015I` (시간대별 로그인 카운트 집계)
 * **목적**: 사용자 로그인 시각 중 `yyyyMMdd`와 `HH`를 키워드로 삼아 시간대별 로그인 횟수를 집계합니다.
-* **동작 원리 (원자적 업데이트)**: Hazelcast는 분산 락 프리(Lock-free) 환경에서 내부적인 EntryProcessor를 사용하여 스레드 안전하게 카운트 값을 변경합니다.
-* **동작 (중복 카운팅 핵심 제어)**: 2단계 상태 머신에서 **최초로 해당 세션이 완성된 찰나에만 켜서 보낸 `isNewLogin == true` 플래그를 엄격히 검사**합니다. 이 플래그가 없거나 이미 로그아웃된 세션이 다시 들어오는 경우 등엔 완전히 무시(`oldValue` 그대로 리턴)하고, 오직 해당 플래그가 켜진 상태에서만 기존 카운트를 `+1` 시킵니다.
-    > 💡 **참고**: 0단계의 JobName 설정 방어로 Job 복제로 인한 중복이 차단되었고, 2단계의 상태 머신 설계로 세션의 복수 이벤트에 대한 중복이 차단되었기 때문에, 이 단계에서는 안심하고 카운트를 증가시킬 수 있습니다.
+* **동작 원리 (원자적 업데이트)**: Hazelcast는 분산 락 프리(Lock-free) 환경에서 `EntryProcessor`를 사용하여 스레드 안전하게 카운트 값을 변경합니다.
+* **사전 필터링**: Sink 진입 전 `.filter()`로 로그아웃 이벤트와 비신규 로그인 이벤트를 사전 차단하여 불필요한 `EntryProcessor` 실행(네트워크 직렬화 및 파티션 라우팅 비용)을 제거합니다.
+* **중복 카운팅 방지 (`groupingKey` + `mapStateful`)**: `wrapperStream`이 여러 downstream sink(step 4, 5, 6)에 fan-out되면서 동일 아이템이 각 sink에 중복 전달될 수 있습니다. step 4, 5는 `setValue`(멱등)라 영향이 없지만, step 6은 `cnt+1`(가산)이므로 `groupingKey` + `mapStateful`로 `sessionId` 기준 중복 제거를 수행합니다. `boolean[]` 배열을 상태로 사용하여 동일 세션에 대해 최초 1회만 카운트가 증가하도록 보장합니다.
+    > 💡 **참고**: 0단계의 JobName 설정 방어로 Job 복제로 인한 중복이 차단되었고, 2단계의 상태 머신 설계로 세션의 복수 이벤트에 대한 중복이 차단되었으며, 이 단계의 `mapStateful` 중복 제거로 fan-out에 의한 중복까지 차단되었기 때문에 안심하고 카운트를 증가시킬 수 있습니다.
 
 ---
 
@@ -78,10 +80,75 @@ StreamStage<SessionEventWrapper> wrapperStream = parsedStream.mapUsingService(ma
    - **고스트 업데이트(Ghost Update) 차단**: 만약 해당 세션이 이미 로그아웃 처리되어 `isLoggedOut` 플래그가 `true`인 상태에서 들어온 `UPDATED` 이벤트라면, 이를 **무시(Return null)**하여 하위 맵의 데이터가 되살아나는 것을 방지합니다.
    - **세션 재사용 처리**: 동일 ID로 신규 로그인(`ADDED`)이 들어오면 모든 상태를 리셋하고 `isLoggedOut`을 다시 `false`로 돌려 정상 처리를 시작합니다.
 3. **최신 값 덮어쓰기**:
-   - **3단계 (`M_SYSSE001I`)**: 기존 값(`oldValue`)을 무시하고, `wrapper`에서 꺼낸 최신 정보들로 새 POJO를 만들어 반환하므로 최신 상태로 덮어써집니다.
-   - **4단계 (`M_SYSSE002I`)**: 최신 값으로 파싱된 `SessionDto` 객체 자체를 통째로 반환하여 완전히 교체합니다.
-   - **5단계 (`M_SYSSE014I`)**: 마찬가지로 로그인되어 있는 상태(업데이트 포함)라면 변경된 최신 `SessionDto`를 씌운 새 POJO를 반환하여 최신 상태로 반영합니다.
+   - **3단계 (`M_SYSSE001I`)**: `EntryProcessor` 내에서 최신 정보들로 새 POJO를 만들어 `entry.setValue()`로 덮어쓰므로 최신 상태로 반영됩니다.
+   - **4단계 (`M_SYSSE002I`)**: 최신 값으로 파싱된 `SessionDto` 객체 자체를 `entry.setValue()`로 통째로 교체합니다.
+   - **5단계 (`M_SYSSE014I`)**: 마찬가지로 로그인되어 있는 상태(업데이트 포함)라면 변경된 최신 `SessionDto`를 씌운 새 POJO를 `entry.setValue()`로 반영합니다.
 4. **카운트 중복 방지**: 6단계 `M_SYSSE015I`는 `isNewLogin == false`인 이벤트에 대해서는 집계하지 않고 기존 카운트(`oldValue`)를 그대로 유지하므로, 단순 정보 업데이트 이벤트로 인해 카운트가 중복 상승하는 부작용이 없습니다.
+
+---
+
+## 6. 이벤트 순서 역전 및 중복 도착에 대한 방어 전략
+
+분산 환경에서는 `REMOVED` → `UPDATED`, `EXPIRED` → `UPDATED` 등 이벤트 순서가 논리적 기대와 다르게 도착하거나, 동일 이벤트가 중복 전달될 수 있습니다. 이를 방어하기 위해 파이프라인 전 구간에 걸쳐 다층 방어를 적용합니다.
+
+### 6.1. 2단계: 중복 로그아웃 이벤트 억제
+동일 세션에 대해 `REMOVED`/`EXPIRED` 이벤트가 2번 이상 도착하는 경우, 첫 번째 처리 시 `isLoggedOut = true`로 마킹된 상태이므로 두 번째부터는 `null`을 리턴하여 하위 스트림에 로그아웃 이벤트가 중복 전파되지 않도록 합니다.
+```java
+if (sessionInfo.isLoggedOut) {
+    return null; // 이미 로그아웃 처리됨 — 중복 전파 방지
+}
+```
+
+### 6.2. 3단계 (`M_SYSSE001I`): 고스트 업데이트로 인한 엔트리 부활 방지
+기존에는 `isComplete`만 확인하고 무조건 엔트리를 생성했으나, 이제는 4단계(`M_SYSSE002I`)와 동일한 패턴으로 방어합니다.
+```java
+// 엔트리가 이미 삭제(null)된 상태에서 신규 로그인이 아닌 업데이트가 도착하면 스킵
+if (entry.getValue() == null && !isNewLogin) {
+    return null;
+}
+```
+
+### 6.3. 5단계 (`M_SYSSE014I`): 동일 세션ID 재로그인 허용
+기존에는 `logoutAt`이 기록된 엔트리에 대해 모든 업데이트를 차단했으나, 동일 세션ID로 **정당한 재로그인**(`isNewLogin == true`)이 발생한 경우에는 새 POJO로 덮어쓰기를 허용합니다.
+```java
+// logoutAt이 있더라도 신규 로그인이면 허용 (정당한 세션 재사용)
+if (oldValue != null && oldValue.getLogoutAt() != null && !isNewLogin) {
+    return null;
+}
+```
+
+### 6.4. 6단계 (`M_SYSSE015I`): 사전 필터링 + fan-out 중복 제거
+기존에는 모든 이벤트가 `EntryProcessor`까지 도달한 뒤 내부에서 `noOp` 여부를 판단했으나, 이제는 Sink 진입 전에 `.filter()`로 로그아웃 이벤트와 비신규 로그인 이벤트를 사전 차단합니다. 이를 통해 불필요한 네트워크 직렬화 및 파티션 라우팅 비용을 절감합니다.
+
+추가로, `wrapperStream`이 여러 downstream sink에 fan-out되면서 동일 아이템이 중복 전달될 수 있으므로, `groupingKey` + `mapStateful`로 `sessionId` 기준 중복 제거를 수행합니다.
+```java
+wrapperStream
+    .filter(wrapper -> !wrapper.transport.isLogout && wrapper.transport.isNewLogin)
+    .groupingKey(wrapper -> wrapper.transport.sessionId)
+    .<boolean[], SessionEventWrapper>mapStateful(
+            TimeUnit.HOURS.toMillis(11),
+            () -> new boolean[]{ false },
+            (counted, key, wrapper) -> {
+                if (!counted[0]) { counted[0] = true; return wrapper; }
+                return null; // 중복 억제
+            },
+            (counted, key, timestamp) -> null)
+    .filter(wrapper -> wrapper != null)
+    .writeTo(Sinks.mapWithEntryProcessor("M_SYSSE015I", ...));
+```
+
+### 6.5. 방어 구간 요약
+
+| 단계 | 방어 대상 | 방어 방식 |
+|------|-----------|-----------|
+| 2단계 `mapStateful` | REMOVED/EXPIRED 중복 도착 | `isLoggedOut` 확인 후 `null` 리턴 |
+| 2단계 `mapStateful` | 로그아웃 후 고스트 UPDATED | `isLoggedOut` Sticky Flag로 차단 |
+| 3단계 `M_SYSSE001I` | 삭제 후 고스트 업데이트 부활 | `entry.getValue() == null && !isNewLogin` 체크 |
+| 4단계 `M_SYSSE002I` | 삭제 후 고스트 업데이트 부활 | `entry.getValue() == null && !isNewLogin` 체크 |
+| 5단계 `M_SYSSE014I` | logoutAt 기록 후 고스트 업데이트 | `logoutAt != null && !isNewLogin` 체크 |
+| 5단계 `M_SYSSE014I` | 동일 세션ID 정당한 재로그인 | `isNewLogin == true`이면 logoutAt 방어 해제 |
+| 6단계 `M_SYSSE015I` | 불필요한 EP 실행 | Sink 진입 전 `.filter()`로 사전 차단 |
+| 6단계 `M_SYSSE015I` | fan-out 중복 카운팅 | `groupingKey` + `mapStateful`로 sessionId 기준 중복 제거 |
 
 ---
 

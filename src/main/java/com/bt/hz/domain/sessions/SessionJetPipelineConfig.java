@@ -127,9 +127,13 @@ public class SessionJetPipelineConfig {
                         (sessionInfo, sessionId, event) -> {
                             // 1. 로그아웃/만료 감지 (REMOVED, EXPIRED)
                             if (event.eventType == com.hazelcast.core.EntryEventType.REMOVED ||
-
                                     event.eventType == com.hazelcast.core.EntryEventType.EXPIRED ||
                                     event.isLogout) {
+                                // 이미 로그아웃 처리된 세션에 REMOVED/EXPIRED가 중복 도착하면 무시
+                                // (하위 스트림에 로그아웃 이벤트가 2번 이상 전파되는 것을 방지)
+                                if (sessionInfo.isLoggedOut) {
+                                    return null;
+                                }
                                 sessionInfo.clear();
                                 sessionInfo.isLoggedOut = true; // "이미 로그아웃됨" 마킹 (Sticky Flag)
                                 return new SessionEventTransport(sessionId, null, null, null, true, false);
@@ -199,21 +203,36 @@ public class SessionJetPipelineConfig {
                         dto.sessionId, dto.isLogout, dto.isComplete(), dto.login, dto.loginType, dto.userInfo);
             }
             return null;
-        }).writeTo(Sinks.mapWithUpdating(
+        }).writeTo(Sinks.mapWithEntryProcessor(
                 "M_SYSSE001I",
                 dto -> dto.sessionId,
-                (com.bt.hz.domain.sessions.models.SYSSE001I oldValue, SessionEventTransport dto) -> {
-                    if (dto.isLogout)
-                        return null; // 삭제
-                    if (!dto.isComplete())
-                        return oldValue; // 상태 유지
+                dto -> {
+                    final boolean isLogout = dto.isLogout;
+                    final boolean isComplete = dto.isComplete();
+                    final boolean isNewLogin = dto.isNewLogin;
+                    final String sessionId = dto.sessionId;
+                    final String login = String.valueOf(dto.login);
+                    final String loginType = String.valueOf(dto.loginType);
+                    final String userInfo = String.valueOf(dto.userInfo);
 
-                    com.bt.hz.domain.sessions.models.SYSSE001I pojo = new com.bt.hz.domain.sessions.models.SYSSE001I();
-                    pojo.setLogin(String.valueOf(dto.login));
-                    pojo.setLoginType(String.valueOf(dto.loginType));
-                    pojo.setUserInfo(String.valueOf(dto.userInfo));
-                    pojo.setSessionId(dto.sessionId);
-                    return pojo;
+                    return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE001I, Void>) entry -> {
+                        if (isLogout) {
+                            entry.setValue(null);
+                        } else if (isComplete) {
+                            // 방어: 엔트리가 이미 삭제된 상태(null)인데 신규 로그인도 아니면
+                            // REMOVE → UPDATE 순서로 도착한 고스트 UPDATE이므로 스킵 (세션 부활 방지)
+                            if (entry.getValue() == null && !isNewLogin) {
+                                return null;
+                            }
+                            com.bt.hz.domain.sessions.models.SYSSE001I pojo = new com.bt.hz.domain.sessions.models.SYSSE001I();
+                            pojo.setLogin(login);
+                            pojo.setLoginType(loginType);
+                            pojo.setUserInfo(userInfo);
+                            pojo.setSessionId(sessionId);
+                            entry.setValue(pojo);
+                        }
+                        return null;
+                    };
                 }));
 
         // EventTransport -> sessionDto 파싱 및 운반용 래퍼로 변환
@@ -234,93 +253,137 @@ public class SessionJetPipelineConfig {
         }).filter(w -> w != null);
 
         // 4단계 : 추출된 값들 중 USER_INFO 값을 M_SYSSE002I에 반영 (로그아웃 시 삭제)
-        wrapperStream.writeTo(Sinks.mapWithUpdating(
+        wrapperStream.writeTo(Sinks.mapWithEntryProcessor(
                 "M_SYSSE002I",
                 wrapper -> wrapper.transport.sessionId,
-                (com.bt.hz.domain.sessions.models.SessionDto oldValue, SessionEventWrapper wrapper) -> {
-                    if (wrapper.transport.isLogout)
-                        return null; // 삭제
-                    return wrapper.sessionDto;
-                }));
-
-        // 5단계 : M_SYSSE014I 맵 (Hazelcast SQL 지원을 위한 POJO 타입 저장)
-        // 외부의 concurrent wirte가 없다면 현재 상태 유지하고 있다면 6단계처럼 mapWithEntryProcessor를 사용하는
-        // 방법으로 수정할 것!
-        wrapperStream.writeTo(Sinks.mapWithUpdating(
-                "M_SYSSE014I",
-                wrapper -> wrapper.transport.sessionId,
-                (com.bt.hz.domain.sessions.models.SYSSE014I oldValue, SessionEventWrapper wrapper) -> {
-                    if (wrapper.transport.isLogout) {
-                        // 로그아웃 시: 기존 값이 있다면 logoutAt만 업데이트해서 유지, 없으면 null 리턴
-                        if (oldValue == null) {
-                            return null;
-                        }
-                        java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter
-                                .ofPattern("yyyyMMddHHmmss");
-                        oldValue.setLogoutAt(java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).format(formatter));
-                        return oldValue;
-                    } else {
-                        // 로그인 시: SessionDto와 loginType 기반으로 새로운 SYSSE014I 객체 생성
-                        com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
-                        com.bt.hz.domain.sessions.models.SYSSE014I pojo = new com.bt.hz.domain.sessions.models.SYSSE014I();
-                        pojo.setUserId(userDto.getUserId());
-                        pojo.setUserName(userDto.getUserName());
-                        pojo.setRole(userDto.getRole());
-                        pojo.setNum(userDto.getNum());
-                        pojo.setAge(userDto.getAge());
-                        if (userDto.getLoginAt() != null) {
-                            pojo.setLoginAt(userDto.getLoginAt());
-                        }
-                        pojo.setLoginType(String.valueOf(wrapper.transport.loginType));
-                        // 로그인 시에는 logoutAt은 null 상태로 둠
-                        return pojo;
-                    }
-                }));
-
-        // 6단계 : M_SYSSE015I 맵 (시간대별 로그인 수 집계)
-        // mapWithEntryProcessor를 사용하여 외부 스케줄러의 EntryProcessor와 파티션 레벨에서 직렬화되어 원자적으로 실행됨
-        wrapperStream.peek(wrapper -> {
-            org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
-            if (l.isDebugEnabled()) {
-                l.debug("[SessionJetPipeline] Step 6 Input -> Session ID: {}, isLogout: {}, isNewLogin: {}",
-                        wrapper.transport.sessionId, wrapper.transport.isLogout, wrapper.transport.isNewLogin);
-            }
-            return null;
-        }).writeTo(Sinks.mapWithEntryProcessor(
-                "M_SYSSE015I",
                 wrapper -> {
-                    com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
-                    if (userDto != null && userDto.getLoginAt() != null && userDto.getLoginAt().length() >= 10) {
-                        String loginAt = userDto.getLoginAt();
-                        return loginAt.substring(0, 8) + "_" + loginAt.substring(8, 10);
-                    }
-                    return "UNKNOWN_TIME";
-                },
-                wrapper -> {
-                    String ymd = "UNKNOWN";
-                    String hour = "UNKNOWN";
-                    com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
-                    if (userDto != null && userDto.getLoginAt() != null && userDto.getLoginAt().length() >= 10) {
-                        String loginAt = userDto.getLoginAt();
-                        ymd = loginAt.substring(0, 8);
-                        hour = loginAt.substring(8, 10);
-                    }
-                    final String fYmd = ymd;
-                    final String fHour = hour;
-                    final boolean noOp = wrapper.transport.isLogout || !wrapper.transport.isNewLogin;
-                    return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE015I, Void>) entry -> {
-                        if (noOp)
-                            return null;
-                        com.bt.hz.domain.sessions.models.SYSSE015I current = entry.getValue();
-                        if (current == null) {
-                            entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(fYmd, fHour, 1));
+                    final boolean isLogout = wrapper.transport.isLogout;
+                    final boolean isNewLogin = wrapper.transport.isNewLogin;
+                    final com.bt.hz.domain.sessions.models.SessionDto sessionDto = wrapper.sessionDto;
+                    return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SessionDto, Void>) entry -> {
+                        if (isLogout) {
+                            entry.setValue(null);
                         } else {
-                            entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(
-                                    current.getStdYmd(), current.getStdHour(), current.getCnt() + 1));
+                            // 방어: 엔트리가 이미 삭제된 상태(null)인데 신규 로그인도 아니면
+                            // REMOVE → UPDATE 순서로 도착한 고스트 UPDATE이므로 스킵 (세션 부활 방지)
+                            if (entry.getValue() == null && !isNewLogin) {
+                                return null;
+                            }
+                            entry.setValue(sessionDto);
                         }
                         return null;
                     };
                 }));
+
+        // 5단계 : M_SYSSE014I 맵 (Hazelcast SQL 지원을 위한 POJO 타입 저장)
+        wrapperStream.writeTo(Sinks.mapWithEntryProcessor(
+                "M_SYSSE014I",
+                wrapper -> wrapper.transport.sessionId,
+                wrapper -> {
+                    final boolean isLogout = wrapper.transport.isLogout;
+                    final boolean isNewLogin = wrapper.transport.isNewLogin;
+                    final com.bt.hz.domain.sessions.models.SessionDto userDto = wrapper.sessionDto;
+                    final String loginType = String.valueOf(wrapper.transport.loginType);
+
+                    return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE014I, Void>) entry -> {
+                        com.bt.hz.domain.sessions.models.SYSSE014I oldValue = entry.getValue();
+                        if (isLogout) {
+                            if (oldValue != null) {
+                                java.time.format.DateTimeFormatter formatter = java.time.format.DateTimeFormatter
+                                        .ofPattern("yyyyMMddHHmmss");
+                                oldValue.setLogoutAt(
+                                        java.time.LocalDateTime.now(java.time.ZoneOffset.UTC).format(formatter));
+                                entry.setValue(oldValue);
+                            }
+                        } else {
+                            // 방어: 이미 logoutAt이 기록된 엔트리는 UPDATE로 덮어쓰지 않음
+                            // (REMOVE → UPDATE 순서로 이벤트가 도착한 경우 세션 부활 방지)
+                            // 단, 동일 세션ID로 정당한 재로그인(isNewLogin)이면 허용
+                            if (oldValue != null && oldValue.getLogoutAt() != null && !isNewLogin) {
+                                return null;
+                            }
+                            com.bt.hz.domain.sessions.models.SYSSE014I pojo = new com.bt.hz.domain.sessions.models.SYSSE014I();
+                            pojo.setUserId(userDto.getUserId());
+                            pojo.setUserName(userDto.getUserName());
+                            pojo.setRole(userDto.getRole());
+                            pojo.setNum(userDto.getNum());
+                            pojo.setAge(userDto.getAge());
+                            if (userDto.getLoginAt() != null) {
+                                pojo.setLoginAt(userDto.getLoginAt());
+                            }
+                            pojo.setLoginType(loginType);
+                            entry.setValue(pojo);
+                        }
+                        return null;
+                    };
+                }));
+
+        // 6단계 : M_SYSSE015I 맵 (시간대별 로그인 수 집계)
+        // mapWithEntryProcessor를 사용하여 외부 스케줄러의 EntryProcessor와 파티션 레벨에서 직렬화되어 원자적으로 실행됨
+        // 로그아웃 이벤트와 비신규 로그인은 사전 필터링하여 불필요한 EntryProcessor 실행을 방지
+        //
+        // [중복 카운팅 방지]
+        // wrapperStream이 여러 downstream sink(step 4, 5, 6)에 fan-out되면서
+        // 동일 아이템이 각 sink에 중복 전달될 수 있다.
+        // step 4, 5는 setValue(멱등)라 영향이 없지만, step 6은 cnt+1(가산)이므로
+        // groupingKey + mapStateful로 sessionId 기준 중복 제거를 수행한다.
+        wrapperStream
+                .filter(wrapper -> !wrapper.transport.isLogout && wrapper.transport.isNewLogin)
+                .groupingKey(wrapper -> wrapper.transport.sessionId)
+                .<boolean[], SessionEventWrapper>mapStateful(
+                        java.util.concurrent.TimeUnit.HOURS.toMillis(11),
+                        () -> new boolean[]{ false },
+                        (counted, key, wrapper) -> {
+                            if (!counted[0]) {
+                                counted[0] = true;
+                                return wrapper;
+                            }
+                            org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+                            if (l.isDebugEnabled()) {
+                                l.debug("[SessionJetPipeline] Step 6 - Duplicate suppressed for session: {}", key);
+                            }
+                            return null;
+                        },
+                        (counted, key, timestamp) -> null)
+                .filter(wrapper -> wrapper != null)
+                .peek(wrapper -> {
+                    org.slf4j.Logger l = org.slf4j.LoggerFactory.getLogger(SessionJetPipelineConfig.class);
+                    if (l.isDebugEnabled()) {
+                        l.debug("[SessionJetPipeline] Step 6 Input -> Session ID: {}, isNewLogin: {}",
+                                wrapper.transport.sessionId, wrapper.transport.isNewLogin);
+                    }
+                    return null;
+                }).writeTo(Sinks.mapWithEntryProcessor(
+                        "M_SYSSE015I",
+                        wrapper -> {
+                            String loginAt = wrapper.sessionDto.getLoginAt();
+                            if (loginAt != null && loginAt.length() >= 10) {
+                                return loginAt.substring(0, 8) + "_" + loginAt.substring(8, 10);
+                            }
+                            return "UNKNOWN_TIME";
+                        },
+                        wrapper -> {
+                            String ymd = "UNKNOWN";
+                            String hour = "UNKNOWN";
+                            String loginAt = wrapper.sessionDto.getLoginAt();
+                            if (loginAt != null && loginAt.length() >= 10) {
+                                ymd = loginAt.substring(0, 8);
+                                hour = loginAt.substring(8, 10);
+                            }
+                            final String fYmd = ymd;
+                            final String fHour = hour;
+                            return (com.hazelcast.map.EntryProcessor<String, com.bt.hz.domain.sessions.models.SYSSE015I, Void>) entry -> {
+                                com.bt.hz.domain.sessions.models.SYSSE015I current = entry.getValue();
+                                if (current == null) {
+                                    entry.setValue(
+                                            new com.bt.hz.domain.sessions.models.SYSSE015I(fYmd, fHour, 1));
+                                } else {
+                                    entry.setValue(new com.bt.hz.domain.sessions.models.SYSSE015I(
+                                            current.getStdYmd(), current.getStdHour(), current.getCnt() + 1));
+                                }
+                                return null;
+                            };
+                        }));
 
         return p;
     }
